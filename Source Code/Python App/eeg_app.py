@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import (
     QToolBar, QColorDialog, QFileDialog, QGridLayout, QSlider,
     QDoubleSpinBox, QSizePolicy, QDesktopWidget, QSpinBox,
     QDialog, QDialogButtonBox, QGroupBox, QRadioButton, QButtonGroup,
-    QLineEdit, QProgressBar
+    QLineEdit, QProgressBar, QStackedWidget
 )
 from PyQt5.QtCore import QTimer, Qt, QMimeData, QVariantAnimation, QPropertyAnimation, QEasingCurve
 from PyQt5.QtGui import QColor, QDrag, QPixmap
@@ -68,12 +68,12 @@ for _i in range(256):
 def make_separator():
     sep = QFrame()
     sep.setFrameShape(QFrame.HLine)
-    sep.setStyleSheet("color: #2d2d30; background-color: #2d2d30; max-height: 1px;")
+    sep.setStyleSheet("color: #2b2b2b; background-color: #2b2b2b; max-height: 1px;")
     return sep
 
 def section_label(text):
     lbl = QLabel(text)
-    lbl.setStyleSheet("font-weight: bold; color: #7C7C8A; font-size: 11px; letter-spacing: 0.5px;")
+    lbl.setStyleSheet("font-weight: bold; color: #858585; font-size: 10px; letter-spacing: 0.8px;")
     return lbl
 
 def add_band_lines(plot_widget, show=True):
@@ -104,8 +104,8 @@ class DraggablePlotWrapper(QFrame):
 
         self.setFrameShape(QFrame.StyledPanel)
         self.setObjectName("PlotWrapper")
-        self._base_style = "QFrame#PlotWrapper {{ background-color: {bg}; border: 2px solid {bd}; border-radius: 4px; }}"
-        self.reset_style("#2d2d30", "#1c1c1f")
+        self._base_style = "QFrame#PlotWrapper {{ background-color: {bg}; border: 1px solid {bd}; border-radius: 3px; }}"
+        self.reset_style("#3e3e42", "#1e1e1e")
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -116,7 +116,7 @@ class DraggablePlotWrapper(QFrame):
         title_row = QHBoxLayout()
         self.title_bar = QLabel(f" ☰  {ch_label}  (CH {channel_idx+1:02d})")
         self.title_bar.setStyleSheet("""
-            QLabel { background-color: #29292E; color: #E1E1E6; font-weight: bold;
+            QLabel { background-color: #252526; color: #cccccc; font-weight: bold;
                      font-size: 11px; padding: 5px; border-radius: 2px; }
         """)
         self.title_bar.setCursor(Qt.OpenHandCursor)
@@ -124,8 +124,8 @@ class DraggablePlotWrapper(QFrame):
 
         self.peak_label = QLabel("peak: –")
         self.peak_label.setStyleSheet(
-            "color: #00B37E; font-family: Consolas; font-size: 10px; padding: 5px 6px;"
-            " background-color: #29292E; border-radius: 2px;"
+            "color: #4EC9B0; font-family: 'Cascadia Code', Consolas; font-size: 10px; padding: 5px 6px;"
+            " background-color: #252526; border-radius: 2px;"
         )
         title_row.addWidget(self.peak_label)
         layout.addLayout(title_row)
@@ -237,17 +237,18 @@ class ConnectionDialog(QDialog):
         self.result_ser = current_ser
 
         self.setStyleSheet("""
-            QDialog      { background-color: #1c1c1f; color: #E1E1E6; }
-            QLabel       { color: #E1E1E6; font-size: 13px; }
-            QGroupBox    { color: #7C7C8A; font-size: 11px; font-weight: bold;
-                           border: 1px solid #2d2d30; border-radius: 4px;
+            QDialog      { background-color: #1e1e1e; color: #cccccc; }
+            QLabel       { color: #cccccc; font-size: 13px; }
+            QGroupBox    { color: #858585; font-size: 10px; font-weight: bold;
+                           border: 1px solid #3e3e42; border-radius: 3px;
                            margin-top: 8px; padding-top: 10px; }
             QGroupBox::title { subcontrol-origin: margin; left: 8px; }
-            QComboBox    { background-color: #202024; color: #E1E1E6;
-                           border: 1px solid #323238; border-radius: 4px; padding: 5px; }
-            QPushButton  { background-color: #29292E; color: #E1E1E6; font-weight: 500;
-                           border: 1px solid #323238; border-radius: 4px; padding: 6px 14px; }
-            QPushButton:hover { background-color: #323238; }
+            QComboBox    { background-color: #252526; color: #cccccc;
+                           border: 1px solid #3e3e42; border-radius: 3px; padding: 5px; }
+            QPushButton  { background-color: #252526; color: #cccccc; font-weight: 500;
+                           border: 1px solid #3e3e42; border-radius: 3px; padding: 6px 14px; }
+            QPushButton:hover { background-color: #333333; border-color: #007acc; }
+            QPushButton:pressed { background-color: #094771; }
             QLabel#status_lbl { font-family: Consolas; font-size: 12px; padding: 6px;
                                  border-radius: 4px; background-color: #18181B; }
         """)
@@ -324,15 +325,15 @@ class ConnectionDialog(QDialog):
 
         self._conn_btn = QPushButton("🔌 Connect")
         self._conn_btn.setStyleSheet(
-            "QPushButton { background-color:#1e2a1e; border:1px solid #00875F; color:#00B37E; font-weight:bold; }"
-            "QPushButton:hover { background-color:#243324; }"
+            "QPushButton { background-color:#007acc; border:1px solid #1a9fff; color:white; font-weight:bold; }"
+            "QPushButton:hover { background-color:#1a9fff; }"
         )
         self._conn_btn.clicked.connect(self._do_connect)
 
         self._disc_btn = QPushButton("⏏ Disconnect")
         self._disc_btn.setStyleSheet(
-            "QPushButton { background-color:#2a1e1e; border:1px solid #E25C5C; color:#E25C5C; font-weight:bold; }"
-            "QPushButton:hover { background-color:#3a2020; }"
+            "QPushButton { background-color:#252526; border:1px solid #3e3e42; color:#cccccc; font-weight:bold; }"
+            "QPushButton:hover { background-color:#333333; border-color:#007acc; }"
         )
         self._disc_btn.clicked.connect(self._do_disconnect)
 
@@ -436,10 +437,10 @@ class RecordingDialog(QDialog):
         self.setWindowTitle("Configure Recording Session")
         self.setMinimumWidth(460)
         self.setStyleSheet("""
-            QDialog        { background-color: #1c1c1f; color: #E1E1E6; }
-            QLabel         { color: #E1E1E6; font-size: 13px; }
-            QGroupBox      { color: #7C7C8A; font-size: 11px; font-weight: bold;
-                             border: 1px solid #2d2d30; border-radius: 4px;
+            QDialog        { background-color: #1e1e1e; color: #cccccc; }
+            QLabel         { color: #cccccc; font-size: 13px; }
+            QGroupBox      { color: #858585; font-size: 10px; font-weight: bold;
+                             border: 1px solid #3e3e42; border-radius: 3px;
                              margin-top: 8px; padding-top: 10px; }
             QGroupBox::title { subcontrol-origin: margin; left: 8px; }
             QCheckBox      { color: #C4C4CC; font-size: 12px; padding: 2px; }
@@ -449,9 +450,9 @@ class RecordingDialog(QDialog):
             QSpinBox, QLineEdit {
                 background-color: #202024; color: white;
                 border: 1px solid #323238; border-radius: 4px; padding: 4px; }
-            QPushButton    { background-color: #29292E; color: #E1E1E6; font-weight: 500;
-                             border: 1px solid #323238; border-radius: 4px; padding: 6px 14px; }
-            QPushButton:hover { background-color: #323238; }
+            QPushButton    { background-color: #252526; color: #cccccc; font-weight: 500;
+                             border: 1px solid #3e3e42; border-radius: 3px; padding: 6px 14px; }
+            QPushButton:hover { background-color: #333333; border-color: #007acc; }
         """)
 
         root = QVBoxLayout(self)
@@ -547,8 +548,8 @@ class RecordingDialog(QDialog):
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.button(QDialogButtonBox.Ok).setText("▶  Start Recording")
         btns.button(QDialogButtonBox.Ok).setStyleSheet(
-            "QPushButton { background-color:#1e2a1e; border:1px solid #00875F; color:#00B37E; }"
-            "QPushButton:hover { background-color:#243324; }"
+            "QPushButton { background-color:#007acc; border:1px solid #1a9fff; color:white; }"
+            "QPushButton:hover { background-color:#1a9fff; }"
         )
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
@@ -595,23 +596,46 @@ class MultiChannelFFTApp(QMainWindow):
         self.setAcceptDrops(True)
 
         self.setStyleSheet("""
-            QMainWindow  { background-color: #121214; }
-            QToolBar     { background-color: #1c1c1f; border-bottom: 1px solid #2d2d30; padding: 6px; }
-            QLabel       { color: #E1E1E6; font-family: 'Segoe UI', Arial; font-size: 13px; }
-            QComboBox    { background-color: #202024; color: #E1E1E6; border: 1px solid #323238;
-                           border-radius: 4px; padding: 5px 8px; min-width: 80px; }
-            QPushButton  { background-color: #29292E; color: #E1E1E6; font-weight: 500;
-                           border: 1px solid #323238; border-radius: 4px; padding: 6px 14px; }
-            QPushButton:hover { background-color: #323238; border-color: #44444A; }
+            QMainWindow  { background-color: #181818; }
+            QToolBar     { background-color: #181818; border-bottom: 1px solid #2b2b2b; padding: 5px 8px; }
+            QLabel       { color: #cccccc; font-family: 'Segoe UI', Arial; font-size: 13px; }
+            QComboBox    { background-color: #252526; color: #cccccc; border: 1px solid #3e3e42;
+                           border-radius: 3px; padding: 5px 8px; min-width: 80px; }
+            QComboBox:hover, QSpinBox:hover, QDoubleSpinBox:hover { border-color: #007acc; }
+            QComboBox QAbstractItemView { background-color: #252526; color: #cccccc; selection-background-color: #094771; }
+            QPushButton  { background-color: #252526; color: #cccccc; font-weight: 500;
+                           border: 1px solid #3e3e42; border-radius: 3px; padding: 6px 12px; }
+            QPushButton:hover { background-color: #333333; border-color: #007acc; }
+            QPushButton:pressed { background-color: #094771; }
             QScrollArea  { border: none; background-color: transparent; }
-            QCheckBox    { color: #C4C4CC; font-family: 'Segoe UI'; font-size: 12px; padding: 3px; }
+            QCheckBox    { color: #cccccc; font-family: 'Segoe UI'; font-size: 12px; padding: 3px; }
             QCheckBox:hover { color: white; }
             QDoubleSpinBox, QSpinBox {
-                background-color: #202024; color: white; border: 1px solid #323238;
-                border-radius: 4px; padding: 4px; min-width: 65px; }
-            QSlider::groove:horizontal { border:1px solid #323238; height:6px; background:#202024; border-radius:3px; }
-            QSlider::handle:horizontal { background:#00875F; width:14px; margin:-4px 0; border-radius:7px; }
-            QSlider::handle:horizontal:hover { background:#00B37E; }
+                background-color: #252526; color: white; border: 1px solid #3e3e42;
+                border-radius: 3px; padding: 4px; min-width: 65px; }
+            QSlider::groove:horizontal { border:1px solid #3e3e42; height:6px; background:#252526; border-radius:3px; }
+            QSlider::handle:horizontal { background:#007acc; width:14px; margin:-4px 0; border-radius:7px; }
+            QSlider::handle:horizontal:hover { background:#1a9fff; }
+            QScrollBar:vertical { background:#181818; width:10px; margin:0; }
+            QScrollBar::handle:vertical { background:#424242; min-height:24px; border-radius:3px; }
+            QScrollBar::handle:vertical:hover { background:#5a5a5a; }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }
+            QFrame#HomePage { background-color:#1e1e1e; border:1px solid #2b2b2b; border-radius:3px; }
+            QFrame#HomeHero { background-color:#252526; border:1px solid #3e3e42; border-left:3px solid #007acc; border-radius:3px; }
+            QFrame#MetricCard { background-color:#252526; border:1px solid #3e3e42; border-radius:3px; }
+            QFrame#MetricCard:hover { border-color:#007acc; }
+            QFrame#HomeActions { background-color:#252526; border:1px solid #3e3e42; border-radius:3px; }
+            QLabel#HomeEyebrow { color:#858585; font-size:10px; font-weight:bold; letter-spacing:1px; }
+            QLabel#HomeTitle { color:#ffffff; font-size:24px; font-weight:bold; }
+            QLabel#HomeHeroDetail { color:#858585; font-size:12px; }
+            QLabel#HomeStatus { color:#4ec9b0; background:#183b3b; border:1px solid #245b59; border-radius:3px; padding:6px 10px; font-size:10px; font-weight:bold; }
+            QLabel#MetricValue { color:#ffffff; font-size:22px; font-weight:bold; }
+            QLabel#MetricLabel { color:#858585; font-size:10px; font-weight:bold; letter-spacing:0.6px; }
+            QLabel#MetricDetail { color:#cccccc; font-size:11px; }
+            QPushButton#PrimaryAction { background-color:#007acc; color:white; border:1px solid #1a9fff; font-weight:bold; padding:9px 16px; }
+            QPushButton#PrimaryAction:hover { background-color:#1a9fff; }
+            QPushButton#SecondaryAction { background-color:#252526; color:#cccccc; border:1px solid #3e3e42; padding:9px 16px; }
+            QPushButton#SecondaryAction:hover { background-color:#333333; border-color:#007acc; }
         """)
 
         # ── State ──────────────────────────────────────────────────────────────
@@ -659,13 +683,20 @@ class MultiChannelFFTApp(QMainWindow):
         main_workspace = QWidget()
         self.setCentralWidget(main_workspace)
         self.layout_core = QHBoxLayout(main_workspace)
-        self.layout_core.setContentsMargins(10, 10, 10, 10)
-        self.layout_core.setSpacing(10)
+        self.layout_core.setContentsMargins(12, 12, 12, 12)
+        self.layout_core.setSpacing(12)
+
+        self.content_stack = QStackedWidget()
+        self.layout_core.addWidget(self.content_stack, stretch=1)
 
         self.plot_container = QWidget()
+        self.plot_container.setObjectName("PlotWorkspace")
+        self.plot_container.setStyleSheet(
+            "QWidget#PlotWorkspace { background-color: #1e1e1e; border: 1px solid #2b2b2b; border-radius: 3px; }"
+        )
         self.plot_container_layout = QVBoxLayout(self.plot_container)
         self.plot_container_layout.setContentsMargins(0, 0, 0, 0)
-        self.layout_core.addWidget(self.plot_container, stretch=1)
+        self.content_stack.addWidget(self.plot_container)
 
         self.init_plot_display()
 
@@ -675,6 +706,8 @@ class MultiChannelFFTApp(QMainWindow):
         self.band_region_items = []   # for merged view
 
         self.init_left_navigation_menu(self.layout_core)
+        self.init_home_dashboard()
+        self.show_home()
         self.update_channel_visibility()
 
         self.timer = QTimer()
@@ -682,71 +715,264 @@ class MultiChannelFFTApp(QMainWindow):
         self.timer.start(16)
 
     # ══════════════════════════════════════════════════════════════════════════
+    # Home dashboard
+    # ══════════════════════════════════════════════════════════════════════════
+    def init_home_dashboard(self):
+        self.home_page = QFrame()
+        self.home_page.setObjectName("HomePage")
+
+        root = QVBoxLayout(self.home_page)
+        root.setContentsMargins(34, 30, 34, 30)
+        root.setSpacing(16)
+
+        hero = QFrame()
+        hero.setObjectName("HomeHero")
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(18, 15, 18, 15)
+        hero_layout.setSpacing(5)
+
+        eyebrow = QLabel("EEG STUDIO  /  OVERVIEW")
+        eyebrow.setObjectName("HomeEyebrow")
+        hero_layout.addWidget(eyebrow)
+
+        hero_row = QHBoxLayout()
+        title = QLabel("Signal workspace")
+        title.setObjectName("HomeTitle")
+        hero_row.addWidget(title)
+        hero_row.addStretch()
+
+        self.home_status_label = QLabel("●  SYSTEM READY")
+        self.home_status_label.setObjectName("HomeStatus")
+        hero_row.addWidget(self.home_status_label)
+        hero_layout.addLayout(hero_row)
+
+        subtitle = QLabel(
+            "Monitor acquisition health and open the live spectrum workspace when you are ready."
+        )
+        subtitle.setObjectName("HomeHeroDetail")
+        hero_layout.addWidget(subtitle)
+        root.addWidget(hero)
+
+        cards = QGridLayout()
+        cards.setHorizontalSpacing(12)
+        cards.setVerticalSpacing(12)
+
+        def add_metric(row, col, label, value, detail, accent):
+            card = QFrame()
+            card.setObjectName("MetricCard")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(16, 14, 16, 14)
+            card_layout.setSpacing(5)
+
+            metric_label = QLabel(label)
+            metric_label.setObjectName("MetricLabel")
+            card_layout.addWidget(metric_label)
+
+            value_label = QLabel(value)
+            value_label.setObjectName("MetricValue")
+            value_label.setStyleSheet(f"color:{accent}; font-size:22px; font-weight:bold;")
+            card_layout.addWidget(value_label)
+
+            detail_label = QLabel(detail)
+            detail_label.setObjectName("MetricDetail")
+            card_layout.addWidget(detail_label)
+            cards.addWidget(card, row, col)
+            return value_label, detail_label
+
+        self.home_connection_value, self.home_connection_detail = add_metric(
+            0, 0, "HARDWARE LINK", "OFFLINE", "Scan a port to begin", "#f48771"
+        )
+        self.home_channels_value, self.home_channels_detail = add_metric(
+            0, 1, "ACTIVE CHANNELS", "04 / 32", "Visible in the analyzer", "#4ec9b0"
+        )
+        self.home_packets_value, self.home_packets_detail = add_metric(
+            0, 2, "PACKETS RECEIVED", "0", "CRC errors: 0", "#569cd6"
+        )
+        self.home_runtime_value, self.home_runtime_detail = add_metric(
+            0, 3, "SESSION RUNTIME", "00:00:00", "Ready for acquisition", "#dcdcaa"
+        )
+        root.addLayout(cards)
+
+        actions = QFrame()
+        actions.setObjectName("HomeActions")
+        actions_layout = QVBoxLayout(actions)
+        actions_layout.setContentsMargins(16, 14, 16, 14)
+        actions_layout.setSpacing(10)
+
+        actions_title = QLabel("QUICK ACTIONS")
+        actions_title.setObjectName("MetricLabel")
+        actions_layout.addWidget(actions_title)
+
+        actions_detail = QLabel("Start with a live view, connect a device, or prepare a recording session.")
+        actions_detail.setObjectName("HomeHeroDetail")
+        actions_layout.addWidget(actions_detail)
+
+        actions_row = QHBoxLayout()
+        dashboard_action = QPushButton("Open Live Dashboard")
+        dashboard_action.setObjectName("PrimaryAction")
+        dashboard_action.clicked.connect(self.show_dashboard)
+        actions_row.addWidget(dashboard_action)
+
+        connect_action = QPushButton("Connect Hardware")
+        connect_action.setObjectName("SecondaryAction")
+        connect_action.clicked.connect(self.open_connection_dialog)
+        actions_row.addWidget(connect_action)
+
+        record_action = QPushButton("Configure Recording")
+        record_action.setObjectName("SecondaryAction")
+        record_action.clicked.connect(self.toggle_recording)
+        actions_row.addWidget(record_action)
+        actions_row.addStretch()
+        actions_layout.addLayout(actions_row)
+        root.addWidget(actions)
+        root.addStretch()
+
+        self.content_stack.addWidget(self.home_page)
+
+    def show_home(self):
+        self.content_stack.setCurrentWidget(self.home_page)
+        self.home_nav_btn.setChecked(True)
+        self.dashboard_nav_btn.setChecked(False)
+        self.workspace_label.setText("OVERVIEW")
+        self._set_dashboard_controls_visible(False)
+        self.nav_frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Maximum)
+        self.nav_frame.setFixedHeight(188)
+        self.layout_core.setAlignment(self.nav_frame, Qt.AlignTop)
+        self.nav_frame.adjustSize()
+
+    def show_dashboard(self):
+        self.content_stack.setCurrentWidget(self.plot_container)
+        self.home_nav_btn.setChecked(False)
+        self.dashboard_nav_btn.setChecked(True)
+        self.workspace_label.setText("SPECTRUM WORKSPACE")
+        self._set_dashboard_controls_visible(True)
+        self.nav_frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
+        self.nav_frame.setMinimumHeight(0)
+        self.nav_frame.setMaximumHeight(16777215)
+        self.layout_core.setAlignment(self.nav_frame, Qt.Alignment())
+
+    @staticmethod
+    def _set_layout_item_visible(item, visible):
+        widget = item.widget()
+        if widget is not None:
+            widget.setVisible(visible)
+            return
+        child_layout = item.layout()
+        if child_layout is not None:
+            for child_index in range(child_layout.count()):
+                MultiChannelFFTApp._set_layout_item_visible(
+                    child_layout.itemAt(child_index), visible
+                )
+
+    def _set_dashboard_controls_visible(self, visible):
+        for widget in self.dashboard_toolbar_widgets:
+            widget.setVisible(visible)
+
+        nav_layout = self.nav_frame.layout()
+        for item_index in range(self.dashboard_nav_start_index, nav_layout.count()):
+            self._set_layout_item_visible(nav_layout.itemAt(item_index), visible)
+
+    # ══════════════════════════════════════════════════════════════════════════
     # Toolbar
     # ══════════════════════════════════════════════════════════════════════════
     def init_control_toolbar(self):
         toolbar = QToolBar("Top Control Deck")
         toolbar.setMovable(False)
+        toolbar.setFixedHeight(52)
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
         container = QWidget()
         layout = QHBoxLayout(container)
-        layout.setContentsMargins(5, 2, 5, 2)
-        layout.setSpacing(10)
+        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setSpacing(6)
+
+        brand = QLabel("◈  EEG STUDIO")
+        brand.setStyleSheet(
+            "color:#ffffff; font-size:13px; font-weight:bold; letter-spacing:0.8px; padding-right:12px;"
+        )
+        layout.addWidget(brand)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.VLine)
+        divider.setStyleSheet("color:#3e3e42; background:#3e3e42; max-width:1px;")
+        layout.addWidget(divider)
+
+        workspace_label = QLabel("SPECTRUM WORKSPACE")
+        self.workspace_label = workspace_label
+        workspace_label.setStyleSheet(
+            "color:#858585; font-size:10px; font-weight:bold; letter-spacing:0.7px; padding:0 8px;"
+        )
+        layout.addWidget(workspace_label)
 
         self.split_btn = QPushButton("Split View")
+        self.split_btn.setFixedHeight(30)
         self.split_btn.clicked.connect(self.toggle_split_view)
         layout.addWidget(self.split_btn)
+        self.dashboard_toolbar_widgets = [self.split_btn]
 
         self.revert_layout_btn = QPushButton("Reset Order")
         self.revert_layout_btn.clicked.connect(self.revert_channels_to_original)
         self.revert_layout_btn.setStyleSheet(
-            "QPushButton { background-color:#222530; border:1px solid #3d445c; }"
-            "QPushButton:hover { background-color:#2b2f40; border-color:#525c7e; }"
+            "QPushButton { background-color:#252526; border:1px solid #3e3e42; }"
+            "QPushButton:hover { background-color:#333333; border-color:#007acc; }"
         )
         self.revert_layout_btn.setEnabled(False)
         layout.addWidget(self.revert_layout_btn)
+        self.dashboard_toolbar_widgets.append(self.revert_layout_btn)
 
         # Column count for split view
-        layout.addWidget(QLabel("Cols:"))
+        cols_label = QLabel("Cols:")
+        layout.addWidget(cols_label)
+        self.dashboard_toolbar_widgets.append(cols_label)
         self.col_spin = QSpinBox()
         self.col_spin.setRange(1, 4)
         self.col_spin.setValue(2)
         self.col_spin.setFixedWidth(48)
         self.col_spin.valueChanged.connect(self._on_col_count_changed)
         layout.addWidget(self.col_spin)
+        self.dashboard_toolbar_widgets.append(self.col_spin)
 
         self.freeze_btn = QPushButton("⏸ Freeze")
+        self.freeze_btn.setFixedHeight(30)
         self.freeze_btn.setStyleSheet(
-            "QPushButton { background-color:#222530; border:1px solid #3d445c; color:#FFB800; }"
-            "QPushButton:hover { background-color:#2b2f40; }"
+            "QPushButton { background-color:#252526; border:1px solid #3e3e42; color:#dcdcaa; }"
+            "QPushButton:hover { background-color:#333333; border-color:#007acc; }"
         )
         self.freeze_btn.clicked.connect(self.toggle_freeze)
         layout.addWidget(self.freeze_btn)
+        self.dashboard_toolbar_widgets.append(self.freeze_btn)
 
         self.band_btn = QPushButton("⚡ Bands ON")
+        self.band_btn.setFixedHeight(30)
         self.band_btn.setStyleSheet(
-            "QPushButton { background-color:#1e2a1e; border:1px solid #00875F; color:#00B37E; }"
-            "QPushButton:hover { background-color:#243324; }"
+            "QPushButton { background-color:#094771; border:1px solid #007acc; color:white; }"
+            "QPushButton:hover { background-color:#0e639c; }"
         )
         self.band_btn.clicked.connect(self.toggle_bands)
         layout.addWidget(self.band_btn)
+        self.dashboard_toolbar_widgets.append(self.band_btn)
 
         self.record_btn = QPushButton("⏺ Record")
+        self.record_btn.setFixedHeight(30)
         self.record_btn.setStyleSheet(
-            "QPushButton { background-color:#2a1e1e; border:1px solid #7a2020; color:#E25C5C; }"
-            "QPushButton:hover { background-color:#3a2020; }"
+            "QPushButton { background-color:#252526; border:1px solid #3e3e42; color:#cccccc; }"
+            "QPushButton:hover { background-color:#333333; border-color:#007acc; }"
         )
         self.record_btn.clicked.connect(self.toggle_recording)
         layout.addWidget(self.record_btn)
+        self.dashboard_toolbar_widgets.append(self.record_btn)
 
         self.export_btn = QPushButton("📷 Snapshot")
+        self.export_btn.setFixedHeight(30)
         self.export_btn.clicked.connect(self.export_plot_image)
         layout.addWidget(self.export_btn)
+        self.dashboard_toolbar_widgets.append(self.export_btn)
 
         self.sidebar_btn = QPushButton("◀ Hide Panel")
+        self.sidebar_btn.setFixedHeight(30)
         self.sidebar_btn.clicked.connect(self.toggle_sidebar)
         layout.addWidget(self.sidebar_btn)
+        self.dashboard_toolbar_widgets.append(self.sidebar_btn)
 
         layout.addStretch()
 
@@ -761,6 +987,7 @@ class MultiChannelFFTApp(QMainWindow):
             "color:#FFB800; font-family:'Consolas',monospace; font-size:12px; font-weight:bold;"
         )
         layout.addWidget(self.telemetry_label)
+        self.dashboard_toolbar_widgets.extend([self.runtime_label, self.telemetry_label])
 
         toolbar.addWidget(container)
 
@@ -770,16 +997,52 @@ class MultiChannelFFTApp(QMainWindow):
     def init_left_navigation_menu(self, parent_layout):
         self.nav_frame = QFrame()
         self.nav_frame.setFixedWidth(260)
+        self.nav_frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.nav_frame.setStyleSheet(
-            "background-color: #1c1c1f; border-radius: 6px; border: 1px solid #2d2d30;"
+            "background-color: #252526; border-radius: 3px; border: 1px solid #2b2b2b;"
         )
 
         nav_layout = QVBoxLayout(self.nav_frame)
-        nav_layout.setContentsMargins(12, 14, 12, 14)
-        nav_layout.setSpacing(14)
+        nav_layout.setContentsMargins(14, 16, 14, 16)
+        nav_layout.setSpacing(10)
+
+        app_title = QLabel("EEG STUDIO")
+        app_title.setStyleSheet(
+            "color:#ffffff; font-size:18px; font-weight:bold; letter-spacing:0.6px; padding:2px 0 0;"
+        )
+        nav_layout.addWidget(app_title)
+
+        app_subtitle = QLabel("32-CHANNEL SIGNAL ANALYZER")
+        app_subtitle.setStyleSheet(
+            "color:#858585; font-size:9px; font-weight:bold; letter-spacing:0.8px; padding-bottom:6px;"
+        )
+        nav_layout.addWidget(app_subtitle)
+        nav_layout.addWidget(make_separator())
+
+        self.home_nav_btn = QPushButton("⌂  Home")
+        self.home_nav_btn.setCheckable(True)
+        self.home_nav_btn.setStyleSheet(
+            "QPushButton { text-align:left; padding:8px 10px; background:#252526; border:1px solid #3e3e42; }"
+            "QPushButton:checked { background:#094771; border-color:#007acc; color:white; }"
+            "QPushButton:hover { background:#333333; border-color:#007acc; }"
+        )
+        self.home_nav_btn.clicked.connect(self.show_home)
+        nav_layout.addWidget(self.home_nav_btn)
+
+        self.dashboard_nav_btn = QPushButton("▦  Live Dashboard")
+        self.dashboard_nav_btn.setCheckable(True)
+        self.dashboard_nav_btn.setStyleSheet(
+            "QPushButton { text-align:left; padding:8px 10px; background:#252526; border:1px solid #3e3e42; }"
+            "QPushButton:checked { background:#094771; border-color:#007acc; color:white; }"
+            "QPushButton:hover { background:#333333; border-color:#007acc; }"
+        )
+        self.dashboard_nav_btn.clicked.connect(self.show_dashboard)
+        nav_layout.addWidget(self.dashboard_nav_btn)
+        nav_layout.addWidget(make_separator())
 
         # ── HARDWARE LINK ──────────────────────────────────────────────────
-        nav_layout.addWidget(section_label("HARDWARE LINK"))
+        self.dashboard_nav_start_index = nav_layout.count()
+        nav_layout.addWidget(section_label("01  HARDWARE LINK"))
 
         self.hw_status_label = QLabel("⬤  Not connected")
         self.hw_status_label.setStyleSheet(
@@ -787,11 +1050,11 @@ class MultiChannelFFTApp(QMainWindow):
         )
         nav_layout.addWidget(self.hw_status_label)
 
-        self.open_conn_btn = QPushButton("🔌  Open Connection Manager")
+        self.open_conn_btn = QPushButton("🔌  CONNECT HARDWARE")
         self.open_conn_btn.setStyleSheet(
-            "QPushButton { background-color:#1e2a1e; border:1px solid #00875F;"
-            " color:#00B37E; font-weight:bold; padding:8px; }"
-            "QPushButton:hover { background-color:#243324; border-color:#00B37E; }"
+            "QPushButton { background-color:#007acc; border:1px solid #1a9fff;"
+            " color:white; font-weight:bold; padding:8px; }"
+            "QPushButton:hover { background-color:#1a9fff; border-color:#1a9fff; }"
         )
         self.open_conn_btn.clicked.connect(self.open_connection_dialog)
         nav_layout.addWidget(self.open_conn_btn)
@@ -799,7 +1062,7 @@ class MultiChannelFFTApp(QMainWindow):
         nav_layout.addWidget(make_separator())
 
         # ── DISPLAY GEOMETRY ───────────────────────────────────────────────
-        nav_layout.addWidget(section_label("DISPLAY GEOMETRY"))
+        nav_layout.addWidget(section_label("02  DISPLAY GEOMETRY"))
 
         cal_row = QHBoxLayout()
         cal_row.addWidget(QLabel("Scale:"))
@@ -845,8 +1108,8 @@ class MultiChannelFFTApp(QMainWindow):
 
         fit_btn = QPushButton("⊡  Fit to Data")
         fit_btn.setStyleSheet(
-            "QPushButton { background-color:#1e2a1e; border:1px solid #00875F; color:#00B37E; }"
-            "QPushButton:hover { background-color:#243324; border-color:#00B37E; }"
+            "QPushButton { background-color:#252526; border:1px solid #3e3e42; color:#cccccc; }"
+            "QPushButton:hover { background-color:#333333; border-color:#007acc; }"
         )
         fit_btn.clicked.connect(self.fit_axes_to_data)
         nav_layout.addWidget(fit_btn)
@@ -854,7 +1117,7 @@ class MultiChannelFFTApp(QMainWindow):
         nav_layout.addWidget(make_separator())
 
         # ── ELECTRODE MATRIX ───────────────────────────────────────────────
-        nav_layout.addWidget(section_label("ELECTRODE MATRIX"))
+        nav_layout.addWidget(section_label("03  ELECTRODE MATRIX"))
 
         macro_row = QHBoxLayout()
         all_on  = QPushButton("All On")
@@ -916,10 +1179,10 @@ class MultiChannelFFTApp(QMainWindow):
 
     def init_plot_display(self):
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground('#18181B')
-        self.plot_widget.setLabel('left',   'Magnitude',  **{'color': '#7C7C8A', 'font-size': '11px'})
-        self.plot_widget.setLabel('bottom', 'Frequency (Hz)', **{'color': '#7C7C8A', 'font-size': '11px'})
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.15)
+        self.plot_widget.setBackground('#1e1e1e')
+        self.plot_widget.setLabel('left',   'Magnitude',  **{'color': '#858585', 'font-size': '11px'})
+        self.plot_widget.setLabel('bottom', 'Frequency (Hz)', **{'color': '#858585', 'font-size': '11px'})
+        self.plot_widget.showGrid(x=True, y=True, alpha=0.20)
         self.plot_widget.setXRange(0, self._x_max_bin(), padding=0)
         self.plot_widget.setYRange(0, self._y_max(), padding=0)
         self.plot_widget.setMouseEnabled(x=False, y=True)
@@ -943,8 +1206,8 @@ class MultiChannelFFTApp(QMainWindow):
         return ticks
 
     def _configure_split_plot(self, pw):
-        pw.setBackground('#18181B')
-        pw.showGrid(x=True, y=True, alpha=0.1)
+        pw.setBackground('#1e1e1e')
+        pw.showGrid(x=True, y=True, alpha=0.20)
         pw.setXRange(0, self._x_max_bin(), padding=0)
         pw.setYRange(0, self._y_max(), padding=0)
         pw.setMouseEnabled(x=False, y=True)
@@ -961,14 +1224,14 @@ class MultiChannelFFTApp(QMainWindow):
         if self.is_frozen:
             self.freeze_btn.setText("▶ Resume")
             self.freeze_btn.setStyleSheet(
-                "QPushButton { background-color:#1e2a1e; border:1px solid #00875F; color:#00B37E; }"
-                "QPushButton:hover { background-color:#243324; }"
+                "QPushButton { background-color:#094771; border:1px solid #007acc; color:white; }"
+                "QPushButton:hover { background-color:#0e639c; }"
             )
         else:
             self.freeze_btn.setText("⏸ Freeze")
             self.freeze_btn.setStyleSheet(
-                "QPushButton { background-color:#222530; border:1px solid #3d445c; color:#FFB800; }"
-                "QPushButton:hover { background-color:#2b2f40; }"
+                "QPushButton { background-color:#252526; border:1px solid #3e3e42; color:#dcdcaa; }"
+                "QPushButton:hover { background-color:#333333; border-color:#007acc; }"
             )
 
     def toggle_bands(self):
@@ -1018,8 +1281,8 @@ class MultiChannelFFTApp(QMainWindow):
             else:
                 self.record_btn.setText("⏹ Stop Rec")
             self.record_btn.setStyleSheet(
-                "QPushButton { background-color:#3a1010; border:1px solid #E25C5C; color:#E25C5C; }"
-                "QPushButton:hover { background-color:#4a1515; }"
+                "QPushButton { background-color:#094771; border:1px solid #007acc; color:white; }"
+                "QPushButton:hover { background-color:#0e639c; }"
             )
         else:
             self._stop_recording()
@@ -1032,8 +1295,8 @@ class MultiChannelFFTApp(QMainWindow):
             self._csv_writer = None
         self.record_btn.setText("⏺ Record")
         self.record_btn.setStyleSheet(
-            "QPushButton { background-color:#2a1e1e; border:1px solid #7a2020; color:#E25C5C; }"
-            "QPushButton:hover { background-color:#3a2020; }"
+            "QPushButton { background-color:#252526; border:1px solid #3e3e42; color:#cccccc; }"
+            "QPushButton:hover { background-color:#333333; border-color:#007acc; }"
         )
 
     def export_plot_image(self):
@@ -1448,6 +1711,32 @@ class MultiChannelFFTApp(QMainWindow):
         self.runtime_label.setText(
             f"T+ {total_s // 60:02d}:{total_s % 60:02d}.{centiseconds:02d}"
         )
+
+        # Home cards mirror existing acquisition state; they do not create a second data path.
+        if hasattr(self, "home_connection_value"):
+            connected = bool(self.ser and self.ser.is_open)
+            self.home_connection_value.setText("ONLINE" if connected else "OFFLINE")
+            self.home_connection_value.setStyleSheet(
+                f"color:{'#4EC9B0' if connected else '#F48771'}; font-size:22px; font-weight:bold;"
+            )
+            self.home_status_label.setText("●  DEVICE ONLINE" if connected else "●  SYSTEM READY")
+            self.home_status_label.setStyleSheet(
+                f"color:{'#4EC9B0' if connected else '#dcdcaa'};"
+                f" background:{'#183b3b' if connected else '#3b351d'};"
+                f" border:1px solid {'#245b59' if connected else '#665b2a'};"
+                " border-radius:3px; padding:6px 10px; font-size:10px; font-weight:bold;"
+            )
+            self.home_connection_detail.setText(
+                "Streaming from serial device" if connected else "Scan a port to begin"
+            )
+            active_channels = sum(cb.isChecked() for cb in self.checkboxes)
+            self.home_channels_value.setText(f"{active_channels:02d} / {NUM_CHANNELS}")
+            self.home_packets_value.setText(f"{self.packet_count:,}")
+            self.home_packets_detail.setText(f"CRC errors: {self._crc_errors}")
+            self.home_runtime_value.setText(f"{total_s // 3600:02d}:{(total_s % 3600) // 60:02d}:{total_s % 60:02d}")
+            self.home_runtime_detail.setText(
+                "Acquisition active" if connected else "Ready for acquisition"
+            )
 
         # Packet-loss / FPS label — update once/sec
         if now - self.last_fps_time >= 1.0:
