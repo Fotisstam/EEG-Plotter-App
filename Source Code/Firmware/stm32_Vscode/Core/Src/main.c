@@ -42,13 +42,18 @@
 #define PROTO_HDR_SIZE   7U
 #define PROTO_DATA_BYTES (NUM_CHANNELS * DISPLAY_BINS * 2U)
 #define PROTO_FRAME_SIZE (PROTO_HDR_SIZE + PROTO_DATA_BYTES + 2U)
+#define STREAM_MODE_FFT  'F'
+#define STREAM_MODE_RAW  'R'
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
 /* Frame cadence. Keep this comfortably above 2x the highest channel
-   frequency below (see SINE_FREQ_MAX) to avoid aliasing between frames. */
-#define FRAME_PERIOD_MS  50U
+   frequency below (see SINE_FREQ_MAX) to avoid aliasing between frames.
+   20 ms keeps the visual update smooth without pushing USB bandwidth too high. */
+#define FRAME_PERIOD_MS  20U
+#define SAMPLE_RATE      256U
+#define RAW_SAMPLES_PER_FRAME ((SAMPLE_RATE * FRAME_PERIOD_MS) / 1000U)
 
 /* All channels share the same frequency/phase so they visibly move in
    lockstep. Change SINE_FREQ_STEP/PHASE_STEP back to non-zero if you
@@ -67,6 +72,7 @@
 
 /* Private variables ---------------------------------------------------------*/
 static uint16_t g_seq = 0;
+static uint32_t g_raw_sample_index = 0;
 
 /* USER CODE BEGIN PV */
 
@@ -110,7 +116,57 @@ static uint16_t crc16_ccitt(const uint8_t *data, uint32_t len)
   return crc;
 }
 
-static void build_sine_frame(uint8_t *frame_buf)
+static uint16_t clamp_u16(float value)
+{
+  if (value < 0.0f)
+  {
+    return 0U;
+  }
+  if (value > 65535.0f)
+  {
+    return 65535U;
+  }
+  return (uint16_t)value;
+}
+
+static float raw_test_sample(uint16_t ch, uint32_t sample_index)
+{
+  const float phase = (float)ch * 0.35f;
+
+  /* Smooth analog sine wave. This should look like a clean time-domain trace in
+     raw-data mode, without harmonics that distort the waveform. */
+  const float signal = sinf(2.0f * (float)M_PI *
+                            ((float)sample_index * 8.0f / (float)SAMPLE_RATE + phase));
+
+  return 32768.0f + signal * 24000.0f;
+}
+
+static float fft_test_sample(uint16_t ch, uint16_t bin, float t)
+{
+  const float freq_hz = (float)bin;
+  const float offset = (float)ch * 0.6f;
+  float total = 0.0f;
+
+  /* Create a few narrow spectral spikes. These are intentionally separate,
+     sharp peaks so the FFT view looks like a frequency-domain plot instead of a sine wave. */
+  const float targets[4] = { 8.0f + offset, 18.0f + offset, 32.0f + offset, 58.0f + offset };
+  const float widths[4] = { 1.3f, 1.4f, 2.0f, 2.5f };
+
+  for (uint8_t peak_index = 0; peak_index < 4U; ++peak_index)
+  {
+    const float target_hz = targets[peak_index];
+    const float width_hz = widths[peak_index];
+    const float delta = freq_hz - target_hz;
+    total += 28000.0f * expf(-(delta * delta) / (2.0f * width_hz * width_hz));
+  }
+
+  /* Modulate the peak magnitudes slightly in time so the FFT plot looks alive. */
+  const float envelope = 0.8f + 0.2f * sinf(2.0f * (float)M_PI * (t * 0.5f + (float)ch * 0.13f));
+
+  return envelope * total + 200.0f;
+}
+
+static void build_sine_frame(uint8_t *frame_buf, uint8_t stream_mode)
 {
   uint8_t *p = frame_buf;
 
@@ -133,21 +189,17 @@ static void build_sine_frame(uint8_t *frame_buf)
      Write each sample through memcpy instead. */
   uint32_t tick = HAL_GetTick();
   const float t = (float)tick / 1000.0f;
+  const uint32_t raw_start = g_raw_sample_index;
 
   for (uint16_t ch = 0; ch < NUM_CHANNELS; ++ch)
   {
-    const float phase = (float)ch * SINE_PHASE_STEP;
-    const float freq = SINE_FREQ_BASE + (float)ch * SINE_FREQ_STEP;
-
     for (uint16_t bin = 0; bin < DISPLAY_BINS; ++bin)
     {
-      const float sine = sinf(2.0f * (float)M_PI * (freq * t + (float)bin / 32.0f + phase));
-      float mag = 20000.0f + (sine + 1.0f) * 20000.0f;
+      float mag = stream_mode == STREAM_MODE_RAW
+          ? raw_test_sample(ch, raw_start + bin)
+          : fft_test_sample(ch, bin, t);
 
-      if (mag < 0.0f) mag = 0.0f;
-      if (mag > 65535.0f) mag = 65535.0f;
-
-      uint16_t sample = (uint16_t)mag;
+      uint16_t sample = clamp_u16(mag);
       memcpy(p, &sample, 2);
       p += 2;
     }
@@ -155,6 +207,11 @@ static void build_sine_frame(uint8_t *frame_buf)
 
   uint16_t crc = crc16_ccitt(frame_buf + PROTO_HDR_SIZE, PROTO_DATA_BYTES);
   memcpy(p, &crc, 2);
+
+  if (stream_mode == STREAM_MODE_RAW)
+  {
+    g_raw_sample_index += RAW_SAMPLES_PER_FRAME;
+  }
 }
 
 /* USER CODE END 0 */
@@ -197,19 +254,25 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   uint8_t frame_index = 0U;
   uint32_t last_tx = 0U;
-  uint32_t last_led_toggle = 0U;
   uint32_t tx_drop_count = 0U; /* bumped whenever CDC_Transmit_FS is busy */
+  uint8_t stream_mode = STREAM_MODE_FFT;
 
   while (1)
   {
     uint32_t now = HAL_GetTick();
+
+    uint8_t requested_mode = CDC_GetStreamMode();
+    if (requested_mode == STREAM_MODE_RAW || requested_mode == STREAM_MODE_FFT)
+    {
+      stream_mode = requested_mode;
+    }
 
     /* Non-blocking transmit gate. No HAL_Delay() in this loop, so this
        check runs every iteration instead of being quantized to a fixed
        delay step -- the frame cadence now matches FRAME_PERIOD_MS. */
     if ((now - last_tx) >= FRAME_PERIOD_MS)
     {
-      build_sine_frame(frame[frame_index]);
+      build_sine_frame(frame[frame_index], stream_mode);
 
       if (CDC_Transmit_FS(frame[frame_index], PROTO_FRAME_SIZE) == USBD_OK)
       {
@@ -225,12 +288,8 @@ int main(void)
       }
     }
 
-    /* Toggle the heartbeat LED every 20 ms without blocking the loop. */
-    if ((now - last_led_toggle) >= 20U)
-    {
-      HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_2);
-      last_led_toggle = now;
-    }
+    
+    
      
     /* USER CODE END WHILE */
 

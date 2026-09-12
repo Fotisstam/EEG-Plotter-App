@@ -21,8 +21,10 @@ from PyQt5.QtGui import QColor, QDrag, QPixmap
 # ── Signal constants ──────────────────────────────────────────────────────────
 FFT_LENGTH   = 256
 DISPLAY_BINS = FFT_LENGTH // 2
+RAW_WINDOW_BINS = DISPLAY_BINS * 4
 NUM_CHANNELS = 32
 SAMPLE_RATE  = 256          # Hz — change to match your STM32 config
+RAW_SAMPLES_PER_FRAME = max(1, round(SAMPLE_RATE * 0.020))
 
 # ── Binary frame protocol (must match firmware) ───────────────────────────────
 PROTO_SYNC0      = 0xAA
@@ -38,11 +40,16 @@ HZ_AXIS   = np.arange(DISPLAY_BINS, dtype=np.float32) * BIN_TO_HZ
 
 # EEG band definitions  (name, lo_hz, hi_hz, colour)
 EEG_BANDS = [
-    ("δ Delta",  0.5,  4.0,  "#5B4FCF"),
-    ("θ Theta",  4.0,  8.0,  "#2E86DE"),
+    ("δ Delta",  0.5,  4.0,  "#569CD6"),
+    ("θ Theta",  4.0,  8.0,  "#4EC9B0"),
     ("α Alpha",  8.0, 13.0,  "#00B37E"),
-    ("β Beta",  13.0, 30.0,  "#FFB800"),
-    ("γ Gamma", 30.0, SAMPLE_RATE / 2, "#E25C5C"),
+    ("β Beta",  13.0, 30.0,  "#DCDCAA"),
+    ("γ Gamma", 30.0, SAMPLE_RATE / 2, "#F48771"),
+]
+
+TRACE_PALETTE = [
+    "#569CD6", "#4EC9B0", "#DCDCAA", "#F48771",
+    "#9CDCFE", "#CE9178", "#B5CEA8", "#D7BA7D",
 ]
 
 EEG_10_20_LABELS = [
@@ -77,21 +84,40 @@ def section_label(text):
     return lbl
 
 def add_band_lines(plot_widget, show=True):
-    """Add vertical band-boundary lines and shaded regions to a PlotWidget."""
+    """Add labeled EEG bands and return all items so visibility can be controlled."""
     items = []
-    for name, lo, hi, color in EEG_BANDS:
+    y_top = plot_widget.viewRange()[1][1] * 0.96
+    for band_index, (name, lo, hi, color) in enumerate(EEG_BANDS):
         lo_bin = lo / BIN_TO_HZ
         hi_bin = hi / BIN_TO_HZ
+        band_color = QColor(color)
+        band_brush = QColor(band_color)
+        band_brush.setAlpha(28)
+        band_pen = QColor(band_color)
+        band_pen.setAlpha(170)
         region = pg.LinearRegionItem(
             values=(lo_bin, hi_bin),
-            brush=pg.mkBrush(QColor(color).darker(300) if QColor(color).isValid() else "#222"),
+            brush=pg.mkBrush(band_brush),
             movable=False,
-            pen=pg.mkPen(color, width=1, style=Qt.DotLine),
+            pen=pg.mkPen(band_pen, width=1, style=Qt.DotLine),
         )
         region.setZValue(-10)
         region.setVisible(show)
+        region._eeg_band_index = band_index
         plot_widget.addItem(region)
         items.append(region)
+
+        label = pg.TextItem(
+            text=name.split()[-1].upper(),
+            color=QColor(color).lighter(125),
+            anchor=(0.5, 1.0),
+        )
+        label.setPos((lo_bin + hi_bin) / 2, y_top)
+        label.setZValue(-5)
+        label.setVisible(show)
+        label._eeg_band_index = band_index
+        plot_widget.addItem(label)
+        items.append(label)
     return items
 
 
@@ -128,6 +154,13 @@ class DraggablePlotWrapper(QFrame):
             " background-color: #252526; border-radius: 2px;"
         )
         title_row.addWidget(self.peak_label)
+
+        self.quality_label = QLabel("NO DATA")
+        self.quality_label.setStyleSheet(
+            "color: #858585; font-family: Consolas; font-size: 9px; font-weight: bold; padding: 5px 6px;"
+            " background-color: #252526; border-radius: 2px;"
+        )
+        title_row.addWidget(self.quality_label)
         layout.addLayout(title_row)
         layout.addWidget(self.plot_widget)
 
@@ -150,10 +183,28 @@ class DraggablePlotWrapper(QFrame):
         idx = min(int(progress * 255), 255)
         self.reset_style(*_FLASH_LUT[idx])
 
-    def update_peak(self, data_row):
+    def update_peak(self, data_row, display_mode="FFT"):
         peak_bin = int(np.argmax(data_row))
-        peak_hz  = peak_bin * BIN_TO_HZ
-        self.peak_label.setText(f"peak: {peak_hz:.1f} Hz")
+        if display_mode == "Raw Data":
+            self.peak_label.setText(f"bin: {peak_bin:03d}")
+        else:
+            peak_hz = peak_bin * BIN_TO_HZ
+            self.peak_label.setText(f"peak: {peak_hz:.1f} Hz")
+
+    def update_quality(self, data_row):
+        peak = float(np.max(data_row))
+        average = float(np.mean(data_row))
+        if peak <= 0.001:
+            quality, color = "NO DATA", "#858585"
+        elif average > 0 and peak / average > 80:
+            quality, color = "CHECK", "#FFB800"
+        else:
+            quality, color = "OK", "#00B37E"
+        self.quality_label.setText(quality)
+        self.quality_label.setStyleSheet(
+            f"color: {color}; font-family: Consolas; font-size: 9px; font-weight: bold; padding: 5px 6px;"
+            " background-color: #252526; border-radius: 2px;"
+        )
 
     def animate_to_pos(self, target_pos):
         self.slide_anim.stop()
@@ -310,8 +361,9 @@ class ConnectionDialog(QDialog):
         info_pair(1, "Channels",      f"{NUM_CHANNELS}")
         info_pair(2, "Bins / channel",f"{DISPLAY_BINS}")
         info_pair(3, "Frame size",    f"{2+2+1+2+NUM_CHANNELS*DISPLAY_BINS*2+2} bytes")
-        info_pair(4, "Integrity",     "CRC-16/CCITT")
-        info_pair(5, "Sample rate",   f"{SAMPLE_RATE} Hz")
+        info_pair(4, "CRC config",    "CCITT / poly 0x1021 / init 0xFFFF")
+        info_pair(5, "CRC scope",     "Payload data bytes only")
+        info_pair(6, "Sample rate",   f"{SAMPLE_RATE} Hz")
         root.addWidget(info_group)
 
         # ── Status label ──────────────────────────────────────────────────
@@ -597,7 +649,7 @@ class MultiChannelFFTApp(QMainWindow):
 
         self.setStyleSheet("""
             QMainWindow  { background-color: #181818; }
-            QToolBar     { background-color: #181818; border-bottom: 1px solid #2b2b2b; padding: 5px 8px; }
+            QToolBar     { background-color: #202024; border-bottom: 1px solid #3e3e42; padding: 6px 10px; }
             QLabel       { color: #cccccc; font-family: 'Segoe UI', Arial; font-size: 13px; }
             QComboBox    { background-color: #252526; color: #cccccc; border: 1px solid #3e3e42;
                            border-radius: 3px; padding: 5px 8px; min-width: 80px; }
@@ -668,14 +720,28 @@ class MultiChannelFFTApp(QMainWindow):
         self._record_channels = list(range(NUM_CHANNELS))
         self._record_elapsed  = 0.0
         self._record_timer    = None
+        self.display_mode     = "FFT"
+        self.show_peak_markers = True
+        self.band_visibility   = [True] * len(EEG_BANDS)
+        self.peak_lines        = {}
+        self.peak_labels       = {}
+        self.plot_signal_proxies = []
+        self.cursor_readout    = None
+        self.auto_scale_y      = False
+        self._frame_ready      = False
 
         self.channel_render_order = list(range(NUM_CHANNELS))
         self.channel_colors = [
-            QColor.fromHsv(int((i * 360) // NUM_CHANNELS), 200, 230)
+            QColor(TRACE_PALETTE[i % len(TRACE_PALETTE)]).lighter(
+                100 + 12 * (i // len(TRACE_PALETTE))
+            )
             for i in range(NUM_CHANNELS)
         ]
 
         self.fft_data_matrix = np.zeros((NUM_CHANNELS, DISPLAY_BINS), dtype=np.float32)
+        self.raw_data_matrix = np.zeros((NUM_CHANNELS, RAW_WINDOW_BINS), dtype=np.float32)
+        self._raw_pending = np.empty((NUM_CHANNELS, 0), dtype=np.float32)
+        self._raw_sample_accumulator = 0.0
 
         # ── Build UI ──────────────────────────────────────────────────────────
         self.init_control_toolbar()
@@ -710,9 +776,13 @@ class MultiChannelFFTApp(QMainWindow):
         self.show_home()
         self.update_channel_visibility()
 
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.update_plots)
-        self.timer.start(16)
+        self.serial_timer = QTimer()
+        self.serial_timer.timeout.connect(self._poll_serial)
+        self.serial_timer.start(2)
+
+        self.render_timer = QTimer()
+        self.render_timer.timeout.connect(self.update_plots)
+        self.render_timer.start(16)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Home dashboard
@@ -722,21 +792,21 @@ class MultiChannelFFTApp(QMainWindow):
         self.home_page.setObjectName("HomePage")
 
         root = QVBoxLayout(self.home_page)
-        root.setContentsMargins(34, 30, 34, 30)
-        root.setSpacing(16)
+        root.setContentsMargins(24, 22, 24, 22)
+        root.setSpacing(12)
 
         hero = QFrame()
         hero.setObjectName("HomeHero")
         hero_layout = QVBoxLayout(hero)
-        hero_layout.setContentsMargins(18, 15, 18, 15)
-        hero_layout.setSpacing(5)
+        hero_layout.setContentsMargins(16, 12, 16, 12)
+        hero_layout.setSpacing(4)
 
-        eyebrow = QLabel("EEG STUDIO  /  OVERVIEW")
+        eyebrow = QLabel("EEG STUDIO  /  ACQUISITION MONITOR")
         eyebrow.setObjectName("HomeEyebrow")
         hero_layout.addWidget(eyebrow)
 
         hero_row = QHBoxLayout()
-        title = QLabel("Signal workspace")
+        title = QLabel("Acquisition overview")
         title.setObjectName("HomeTitle")
         hero_row.addWidget(title)
         hero_row.addStretch()
@@ -747,22 +817,22 @@ class MultiChannelFFTApp(QMainWindow):
         hero_layout.addLayout(hero_row)
 
         subtitle = QLabel(
-            "Monitor acquisition health and open the live spectrum workspace when you are ready."
+            "Serial telemetry and session state from the connected STM32 device."
         )
         subtitle.setObjectName("HomeHeroDetail")
         hero_layout.addWidget(subtitle)
         root.addWidget(hero)
 
         cards = QGridLayout()
-        cards.setHorizontalSpacing(12)
-        cards.setVerticalSpacing(12)
+        cards.setHorizontalSpacing(10)
+        cards.setVerticalSpacing(10)
 
         def add_metric(row, col, label, value, detail, accent):
             card = QFrame()
             card.setObjectName("MetricCard")
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(16, 14, 16, 14)
-            card_layout.setSpacing(5)
+            card_layout.setContentsMargins(14, 12, 14, 12)
+            card_layout.setSpacing(4)
 
             metric_label = QLabel(label)
             metric_label.setObjectName("MetricLabel")
@@ -793,17 +863,48 @@ class MultiChannelFFTApp(QMainWindow):
         )
         root.addLayout(cards)
 
+        link_panel = QFrame()
+        link_panel.setObjectName("HomeActions")
+        link_layout = QVBoxLayout(link_panel)
+        link_layout.setContentsMargins(14, 12, 14, 12)
+        link_layout.setSpacing(8)
+
+        link_title = QLabel("SERIAL LINK PROFILE")
+        link_title.setObjectName("MetricLabel")
+        link_layout.addWidget(link_title)
+
+        link_grid = QGridLayout()
+        link_grid.setHorizontalSpacing(18)
+        link_grid.setVerticalSpacing(4)
+        link_values = [
+            ("Frame sync", "0xAA  0x55"),
+            ("Payload", f"{NUM_CHANNELS} channels  /  {DISPLAY_BINS} bins"),
+            ("CRC config", "CRC-16/CCITT  |  poly 0x1021  |  init 0xFFFF"),
+            ("CRC scope", "Payload data bytes only"),
+            ("Sample rate", f"{SAMPLE_RATE} Hz"),
+        ]
+        for index, (label_text, value_text) in enumerate(link_values):
+            label = QLabel(label_text.upper())
+            label.setObjectName("MetricLabel")
+            value = QLabel(value_text)
+            value.setObjectName("MetricDetail")
+            link_grid.addWidget(label, index, 0)
+            link_grid.addWidget(value, index, 1)
+        link_grid.setColumnStretch(1, 1)
+        link_layout.addLayout(link_grid)
+        root.addWidget(link_panel)
+
         actions = QFrame()
         actions.setObjectName("HomeActions")
         actions_layout = QVBoxLayout(actions)
-        actions_layout.setContentsMargins(16, 14, 16, 14)
-        actions_layout.setSpacing(10)
+        actions_layout.setContentsMargins(14, 12, 14, 12)
+        actions_layout.setSpacing(8)
 
         actions_title = QLabel("QUICK ACTIONS")
         actions_title.setObjectName("MetricLabel")
         actions_layout.addWidget(actions_title)
 
-        actions_detail = QLabel("Start with a live view, connect a device, or prepare a recording session.")
+        actions_detail = QLabel("Use the existing serial stream to inspect, record, or export data.")
         actions_detail.setObjectName("HomeHeroDetail")
         actions_layout.addWidget(actions_detail)
 
@@ -878,17 +979,17 @@ class MultiChannelFFTApp(QMainWindow):
     def init_control_toolbar(self):
         toolbar = QToolBar("Top Control Deck")
         toolbar.setMovable(False)
-        toolbar.setFixedHeight(52)
+        toolbar.setFixedHeight(56)
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
         container = QWidget()
         layout = QHBoxLayout(container)
-        layout.setContentsMargins(8, 2, 8, 2)
+        layout.setContentsMargins(10, 4, 10, 4)
         layout.setSpacing(6)
 
         brand = QLabel("◈  EEG STUDIO")
         brand.setStyleSheet(
-            "color:#ffffff; font-size:13px; font-weight:bold; letter-spacing:0.8px; padding-right:12px;"
+            "color:#4EC9B0; font-size:13px; font-weight:bold; letter-spacing:0.8px; padding-right:12px;"
         )
         layout.addWidget(brand)
 
@@ -904,11 +1005,23 @@ class MultiChannelFFTApp(QMainWindow):
         )
         layout.addWidget(workspace_label)
 
+        mode_label = QLabel("MODE")
+        mode_label.setStyleSheet("color:#858585; font-size:10px; font-weight:bold; padding-left:8px;")
+        layout.addWidget(mode_label)
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["FFT", "Raw Data"])
+        self.mode_combo.setFixedWidth(88)
+        self.mode_combo.currentTextChanged.connect(self.set_display_mode)
+        layout.addWidget(self.mode_combo)
+
+        self.dashboard_toolbar_widgets = []
+        self.dashboard_toolbar_widgets.extend([mode_label, self.mode_combo])
+
         self.split_btn = QPushButton("Split View")
         self.split_btn.setFixedHeight(30)
         self.split_btn.clicked.connect(self.toggle_split_view)
         layout.addWidget(self.split_btn)
-        self.dashboard_toolbar_widgets = [self.split_btn]
+        self.dashboard_toolbar_widgets.append(self.split_btn)
 
         self.revert_layout_btn = QPushButton("Reset Order")
         self.revert_layout_btn.clicked.connect(self.revert_channels_to_original)
@@ -952,6 +1065,12 @@ class MultiChannelFFTApp(QMainWindow):
         layout.addWidget(self.band_btn)
         self.dashboard_toolbar_widgets.append(self.band_btn)
 
+        self.peak_btn = QPushButton("⌖ Peaks ON")
+        self.peak_btn.setFixedHeight(30)
+        self.peak_btn.clicked.connect(self.toggle_peak_markers)
+        layout.addWidget(self.peak_btn)
+        self.dashboard_toolbar_widgets.append(self.peak_btn)
+
         self.record_btn = QPushButton("⏺ Record")
         self.record_btn.setFixedHeight(30)
         self.record_btn.setStyleSheet(
@@ -982,12 +1101,20 @@ class MultiChannelFFTApp(QMainWindow):
         )
         layout.addWidget(self.runtime_label)
 
+        self.cursor_readout = QLabel("Hover a trace for details")
+        self.cursor_readout.setStyleSheet(
+            "color:#858585; font-family:'Consolas',monospace; font-size:11px; padding:0 10px;"
+        )
+        layout.addWidget(self.cursor_readout)
+
         self.telemetry_label = QLabel("Waiting for hardware — click Scan then Connect.")
         self.telemetry_label.setStyleSheet(
             "color:#FFB800; font-family:'Consolas',monospace; font-size:12px; font-weight:bold;"
         )
         layout.addWidget(self.telemetry_label)
-        self.dashboard_toolbar_widgets.extend([self.runtime_label, self.telemetry_label])
+        self.dashboard_toolbar_widgets.extend([
+            self.runtime_label, self.cursor_readout, self.telemetry_label
+        ])
 
         toolbar.addWidget(container)
 
@@ -1022,20 +1149,22 @@ class MultiChannelFFTApp(QMainWindow):
         self.home_nav_btn = QPushButton("⌂  Home")
         self.home_nav_btn.setCheckable(True)
         self.home_nav_btn.setStyleSheet(
-            "QPushButton { text-align:left; padding:8px 10px; background:#252526; border:1px solid #3e3e42; }"
+            "QPushButton { text-align:left; padding:5px 10px; background:#252526; border:1px solid #3e3e42; }"
             "QPushButton:checked { background:#094771; border-color:#007acc; color:white; }"
             "QPushButton:hover { background:#333333; border-color:#007acc; }"
         )
+        self.home_nav_btn.setFixedHeight(34)
         self.home_nav_btn.clicked.connect(self.show_home)
         nav_layout.addWidget(self.home_nav_btn)
 
         self.dashboard_nav_btn = QPushButton("▦  Live Dashboard")
         self.dashboard_nav_btn.setCheckable(True)
         self.dashboard_nav_btn.setStyleSheet(
-            "QPushButton { text-align:left; padding:8px 10px; background:#252526; border:1px solid #3e3e42; }"
+            "QPushButton { text-align:left; padding:5px 10px; background:#252526; border:1px solid #3e3e42; }"
             "QPushButton:checked { background:#094771; border-color:#007acc; color:white; }"
             "QPushButton:hover { background:#333333; border-color:#007acc; }"
         )
+        self.dashboard_nav_btn.setFixedHeight(34)
         self.dashboard_nav_btn.clicked.connect(self.show_dashboard)
         nav_layout.addWidget(self.dashboard_nav_btn)
         nav_layout.addWidget(make_separator())
@@ -1084,7 +1213,8 @@ class MultiChannelFFTApp(QMainWindow):
 
         # X axis max
         x_row = QHBoxLayout()
-        x_row.addWidget(QLabel("X Max (Hz):"))
+        self.x_max_label = QLabel("X Max (Hz):")
+        x_row.addWidget(self.x_max_label)
         self.x_max_spin = QDoubleSpinBox()
         self.x_max_spin.setRange(1, SAMPLE_RATE / 2)
         self.x_max_spin.setDecimals(1)
@@ -1096,7 +1226,8 @@ class MultiChannelFFTApp(QMainWindow):
 
         # Y axis max
         y_row = QHBoxLayout()
-        y_row.addWidget(QLabel("Y Max (mag):"))
+        self.y_max_label = QLabel("Y Max (mag):")
+        y_row.addWidget(self.y_max_label)
         self.y_max_spin = QDoubleSpinBox()
         self.y_max_spin.setRange(1, 100000)
         self.y_max_spin.setDecimals(0)
@@ -1114,10 +1245,34 @@ class MultiChannelFFTApp(QMainWindow):
         fit_btn.clicked.connect(self.fit_axes_to_data)
         nav_layout.addWidget(fit_btn)
 
+        auto_scale = QCheckBox("Auto Y scale")
+        auto_scale.setChecked(False)
+        auto_scale.toggled.connect(self.set_auto_scale)
+        self.auto_scale_check = auto_scale
+        nav_layout.addWidget(auto_scale)
+
+        nav_layout.addWidget(section_label("03  DISPLAY PRESET"))
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItems(["Clinical", "Alpha Focus", "Full Spectrum", "Presentation"])
+        self.preset_combo.currentTextChanged.connect(self.apply_display_preset)
+        nav_layout.addWidget(self.preset_combo)
+
+        nav_layout.addWidget(section_label("04  EEG BANDS"))
+        self.band_checks = []
+        for band_index, (name, _lo, _hi, color) in enumerate(EEG_BANDS):
+            band_check = QCheckBox(name)
+            band_check.setChecked(True)
+            band_check.setStyleSheet(f"QCheckBox {{ color:{color}; }}")
+            band_check.toggled.connect(
+                lambda checked, index=band_index: self.set_band_visibility(index, checked)
+            )
+            self.band_checks.append(band_check)
+            nav_layout.addWidget(band_check)
+
         nav_layout.addWidget(make_separator())
 
         # ── ELECTRODE MATRIX ───────────────────────────────────────────────
-        nav_layout.addWidget(section_label("03  ELECTRODE MATRIX"))
+        nav_layout.addWidget(section_label("05  ELECTRODE MATRIX"))
 
         macro_row = QHBoxLayout()
         all_on  = QPushButton("All On")
@@ -1172,48 +1327,278 @@ class MultiChannelFFTApp(QMainWindow):
         return hz / BIN_TO_HZ
 
     def _x_max_bin(self):
-        return self._hz_to_bin(self.x_max_spin.value()) if hasattr(self, "x_max_spin") else DISPLAY_BINS
+        if not hasattr(self, "x_max_spin"):
+            return DISPLAY_BINS
+        if self.display_mode == "Raw Data":
+            return self.x_max_spin.value()
+        return self._hz_to_bin(self.x_max_spin.value())
+
+    def _display_axis(self):
+        return (
+            np.arange(RAW_WINDOW_BINS, dtype=np.float32)
+            if self.display_mode == "Raw Data" else HZ_AXIS
+        )
+
+    def _plot_data_matrix(self):
+        return self.raw_data_matrix if self.display_mode == "Raw Data" else self.fft_data_matrix
+
+    def _plot_channel_values(self, channel_idx):
+        data = self._plot_data_matrix()[channel_idx]
+        if self.display_mode != "Raw Data":
+            return data
+
+        visible_channels = list(self.curves)
+        try:
+            lane = visible_channels.index(channel_idx)
+        except ValueError:
+            lane = channel_idx
+        baseline = max(0, len(visible_channels) - lane - 1)
+        centered = (data - 32768.0) / 24000.0
+        return baseline + centered * 0.38
 
     def _y_max(self):
+        if self.display_mode == "Raw Data":
+            return max(1.0, float(len(self.curves)))
         return self.y_max_spin.value() if hasattr(self, "y_max_spin") else 80
 
     def init_plot_display(self):
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.setBackground('#1e1e1e')
-        self.plot_widget.setLabel('left',   'Magnitude',  **{'color': '#858585', 'font-size': '11px'})
-        self.plot_widget.setLabel('bottom', 'Frequency (Hz)', **{'color': '#858585', 'font-size': '11px'})
-        self.plot_widget.showGrid(x=True, y=True, alpha=0.20)
-        self.plot_widget.setXRange(0, self._x_max_bin(), padding=0)
-        self.plot_widget.setYRange(0, self._y_max(), padding=0)
-        self.plot_widget.setMouseEnabled(x=False, y=True)
-        self.plot_widget.setMenuEnabled(False)
-
-        # Custom Hz tick labels on X axis
-        ax = self.plot_widget.getAxis('bottom')
-        ax.setTicks([self._build_hz_ticks()])
+        self._style_plot_widget(self.plot_widget, step_hz=8)
 
         self.band_region_items = add_band_lines(self.plot_widget, show=self.show_bands)
+        self.plot_legend = self.plot_widget.addLegend(offset=(10, 10))
+        self.plot_legend.setBrush(pg.mkBrush('#252526E6'))
+        self.plot_legend.setPen(pg.mkPen('#3e3e42'))
+        self._connect_plot_hover(self.plot_widget)
 
+        self.plot_container_layout.addWidget(self._create_graph_header())
         self.plot_container_layout.addWidget(self.plot_widget)
+
+    def _create_graph_header(self):
+        header = QFrame()
+        header.setStyleSheet(
+            "QFrame { background:#252526; border-bottom:1px solid #3e3e42; }"
+            "QLabel#GraphTitle { color:#ffffff; font-size:12px; font-weight:bold; }"
+            "QLabel#GraphDetail { color:#858585; font-size:10px; }"
+            "QLabel#GraphStatus { color:#00B37E; font-family:Consolas; font-size:10px; font-weight:bold; }"
+        )
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(12, 7, 12, 7)
+        header_layout.setSpacing(8)
+
+        title = QLabel("LIVE SPECTRUM")
+        title.setObjectName("GraphTitle")
+        self.graph_title_label = title
+        header_layout.addWidget(title)
+        detail = QLabel("Magnitude by frequency  |  0–128 Hz")
+        detail.setObjectName("GraphDetail")
+        self.graph_detail_label = detail
+        header_layout.addWidget(detail)
+        header_layout.addStretch()
+        self.graph_status_label = QLabel("READY")
+        self.graph_status_label.setObjectName("GraphStatus")
+        header_layout.addWidget(self.graph_status_label)
+        return header
+
+    def _connect_plot_hover(self, plot_widget, channel_idx=None):
+        proxy = pg.SignalProxy(
+            plot_widget.scene().sigMouseMoved,
+            rateLimit=60,
+            slot=lambda event: self._on_plot_mouse_moved(event, plot_widget, channel_idx),
+        )
+        self.plot_signal_proxies.append(proxy)
+
+    def _on_plot_mouse_moved(self, event, plot_widget, channel_idx=None):
+        if self.cursor_readout is None:
+            return
+        position = event[0] if isinstance(event, tuple) else event
+        view_box = plot_widget.getPlotItem().vb
+        if not view_box.sceneBoundingRect().contains(position):
+            self.cursor_readout.setText("Hover a trace for details")
+            return
+
+        point = view_box.mapSceneToView(position)
+        bin_index = int(np.clip(round(point.x()), 0, DISPLAY_BINS - 1))
+        if self.display_mode == "Raw Data":
+            horizontal_text = f"bin {bin_index:03d}"
+        else:
+            horizontal_value = HZ_AXIS[bin_index]
+            horizontal_text = f"{horizontal_value:.1f} Hz"
+        if channel_idx is None:
+            active = list(self.curves.keys())
+            if not active:
+                self.cursor_readout.setText("No active traces")
+                return
+            channel_idx = max(active, key=lambda idx: self.fft_data_matrix[idx, bin_index])
+        magnitude = self.fft_data_matrix[channel_idx, bin_index]
+        label = EEG_10_20_LABELS[channel_idx]
+        self.cursor_readout.setText(
+            f"{label}  |  {horizontal_text}  |  {magnitude:.2f} mag"
+        )
+
+    def _ensure_peak_marker(self, channel_idx, plot_widget):
+        key = (id(plot_widget), channel_idx)
+        if key in self.peak_lines:
+            return
+        line = InfiniteLine(
+            angle=90,
+            movable=False,
+            pen=pg.mkPen('#00B37E', width=1, style=Qt.DashLine),
+        )
+        line.setVisible(self.show_peak_markers)
+        plot_widget.addItem(line)
+        label = pg.TextItem(color='#00B37E', anchor=(0.5, 1.0))
+        label.setVisible(self.show_peak_markers)
+        plot_widget.addItem(label)
+        self.peak_lines[key] = line
+        self.peak_labels[key] = label
+
+    def _update_peak_marker(self, channel_idx, data_row, plot_widget):
+        key = (id(plot_widget), channel_idx)
+        self._ensure_peak_marker(channel_idx, plot_widget)
+        peak_bin = int(np.argmax(data_row))
+        peak_value = float(data_row[peak_bin])
+        self.peak_lines[key].setPos(peak_bin)
+        if self.display_mode == "Raw Data":
+            self.peak_labels[key].setText(f"bin {peak_bin:03d}")
+        else:
+            self.peak_labels[key].setText(f"{peak_bin * BIN_TO_HZ:.1f} Hz")
+        self.peak_labels[key].setPos(peak_bin, max(peak_value, self._y_max() * 0.92))
+
+    def toggle_peak_markers(self):
+        self.show_peak_markers = not self.show_peak_markers
+        self.peak_btn.setText("⌖ Peaks ON" if self.show_peak_markers else "⌖ Peaks OFF")
+        for item in list(self.peak_lines.values()) + list(self.peak_labels.values()):
+            item.setVisible(self.show_peak_markers)
+
+    def _mode_geometry_config(self):
+        if self.display_mode == "Raw Data":
+            return {
+                "x_label": "X Max (samples):",
+                "x_min": 1.0,
+                "x_max": float(RAW_WINDOW_BINS),
+                "x_decimals": 0,
+                "x_step": 1.0,
+                "x_value": float(RAW_WINDOW_BINS),
+                "y_label": "Y Max (raw):",
+                "y_min": 0.0,
+                "y_max": 65535.0,
+                "y_decimals": 0,
+                "y_step": 1000.0,
+                "y_value": 65535.0,
+            }
+        return {
+            "x_label": "X Max (Hz):",
+            "x_min": 1.0,
+            "x_max": float(SAMPLE_RATE / 2),
+            "x_decimals": 1,
+            "x_step": 1.0,
+            "x_value": float(SAMPLE_RATE / 2),
+            "y_label": "Y Max (mag):",
+            "y_min": 1.0,
+            "y_max": 100000.0,
+            "y_decimals": 0,
+            "y_step": 10.0,
+            "y_value": 80.0,
+        }
+
+    def _style_plot_widget(self, plot_widget, step_hz):
+        plot_widget.setBackground('#202024')
+        plot_widget.setLabel('left', 'Magnitude', **{'color': '#858585', 'font-size': '11px'})
+        bottom_label = 'Bin index' if self.display_mode == "Raw Data" else 'Frequency (Hz)'
+        plot_widget.setLabel('bottom', bottom_label, **{'color': '#858585', 'font-size': '11px'})
+        plot_item = plot_widget.getPlotItem()
+        pg.setConfigOptions(antialias=True)
+        plot_item.setDownsampling(auto=True)
+        plot_widget.showGrid(x=True, y=True, alpha=0.10)
+        plot_widget.setXRange(0, self._x_max_bin(), padding=0)
+        plot_widget.setYRange(0, self._y_max(), padding=0)
+        plot_widget.setMouseEnabled(x=False, y=True)
+        plot_widget.setMenuEnabled(False)
+
+        for axis_name in ('left', 'bottom'):
+            axis = plot_widget.getAxis(axis_name)
+            axis.setPen(pg.mkPen('#3e3e42'))
+            axis.setTextPen(pg.mkPen('#858585'))
+            axis.setStyle(tickTextOffset=6)
+
+        plot_widget.getAxis('bottom').setTicks([self._build_hz_ticks(step_hz=step_hz)])
 
     def _build_hz_ticks(self, step_hz=8):
         """Return major tick list [(bin_position, 'N Hz'), ...] for every step_hz Hz."""
         ticks = []
+        if self.display_mode == "Raw Data":
+            return [(index, str(index)) for index in range(0, RAW_WINDOW_BINS, 64)]
         hz = 0
         while hz <= SAMPLE_RATE / 2:
             ticks.append((self._hz_to_bin(hz), f"{hz}"))
             hz += step_hz
         return ticks
 
+    def set_display_mode(self, mode):
+        self.display_mode = mode
+        self._send_stream_command(b"R" if mode == "Raw Data" else b"F")
+        raw_mode = mode == "Raw Data"
+        if raw_mode:
+            self._raw_pending = np.empty((NUM_CHANNELS, 0), dtype=np.float32)
+            self._raw_sample_accumulator = 0.0
+            self.raw_data_matrix.fill(0.0)
+        cfg = self._mode_geometry_config()
+
+        self.x_max_label.setText(cfg["x_label"])
+        self.y_max_label.setText(cfg["y_label"])
+
+        self.x_max_spin.blockSignals(True)
+        self.x_max_spin.setRange(cfg["x_min"], cfg["x_max"])
+        self.x_max_spin.setDecimals(cfg["x_decimals"])
+        self.x_max_spin.setSingleStep(cfg["x_step"])
+        self.x_max_spin.setValue(cfg["x_value"])
+        self.x_max_spin.blockSignals(False)
+
+        self.y_max_spin.blockSignals(True)
+        self.y_max_spin.setRange(cfg["y_min"], cfg["y_max"])
+        self.y_max_spin.setDecimals(cfg["y_decimals"])
+        self.y_max_spin.setSingleStep(cfg["y_step"])
+        self.y_max_spin.setValue(cfg["y_value"])
+        self.y_max_spin.blockSignals(False)
+
+        plots = [self.plot_widget] if not self.is_split_view else [
+            wrapper.plot_widget for wrapper in self.individual_widgets.values()
+        ]
+        for plot_widget in plots:
+            plot_widget.setLabel(
+                'bottom',
+                'Bin index' if raw_mode else 'Frequency (Hz)',
+                **{'color': '#858585', 'font-size': '11px'},
+            )
+            plot_widget.setXRange(0, self._x_max_bin(), padding=0)
+            plot_widget.getAxis('bottom').setTicks([self._build_hz_ticks()])
+
+        self.graph_title_label.setText("RAW FRAME DATA" if raw_mode else "LIVE SPECTRUM")
+        self.graph_detail_label.setText(
+            "Analog sample stream  |  raw waveform view"
+            if raw_mode else "Magnitude by frequency  |  0–128 Hz"
+        )
+        self.plot_legend.setVisible(not raw_mode)
+        for item in list(self.peak_lines.values()) + list(self.peak_labels.values()):
+            item.setVisible(self.show_peak_markers and not raw_mode)
+        self._apply_band_visibility()
+        plot_data = self._plot_data_matrix()
+        for idx, curve in self.curves.items():
+            curve.setData(x=self._display_axis(), y=self._plot_channel_values(idx))
+        self.update_axis_ranges()
+
+    def _send_stream_command(self, command):
+        if not self.ser or not self.ser.is_open:
+            return
+        try:
+            self.ser.write(command)
+            self.ser.flush()
+        except Exception:
+            self._set_status("Stream command failed", "#E25C5C")
+
     def _configure_split_plot(self, pw):
-        pw.setBackground('#1e1e1e')
-        pw.showGrid(x=True, y=True, alpha=0.20)
-        pw.setXRange(0, self._x_max_bin(), padding=0)
-        pw.setYRange(0, self._y_max(), padding=0)
-        pw.setMouseEnabled(x=False, y=True)
-        pw.setMenuEnabled(False)
-        ax = pw.getAxis('bottom')
-        ax.setTicks([self._build_hz_ticks(step_hz=16)])
+        self._style_plot_widget(pw, step_hz=16)
         add_band_lines(pw, show=self.show_bands)
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1223,12 +1608,14 @@ class MultiChannelFFTApp(QMainWindow):
         self.is_frozen = not self.is_frozen
         if self.is_frozen:
             self.freeze_btn.setText("▶ Resume")
+            self.graph_status_label.setText("FROZEN")
             self.freeze_btn.setStyleSheet(
                 "QPushButton { background-color:#094771; border:1px solid #007acc; color:white; }"
                 "QPushButton:hover { background-color:#0e639c; }"
             )
         else:
             self.freeze_btn.setText("⏸ Freeze")
+            self.graph_status_label.setText("LIVE")
             self.freeze_btn.setStyleSheet(
                 "QPushButton { background-color:#252526; border:1px solid #3e3e42; color:#dcdcaa; }"
                 "QPushButton:hover { background-color:#333333; border-color:#007acc; }"
@@ -1237,14 +1624,21 @@ class MultiChannelFFTApp(QMainWindow):
     def toggle_bands(self):
         self.show_bands = not self.show_bands
         self.band_btn.setText("⚡ Bands ON" if self.show_bands else "⚡ Bands OFF")
-        # merged view
-        for item in self.band_region_items:
-            item.setVisible(self.show_bands)
-        # split view panels
-        for wrapper in self.individual_widgets.values():
-            for item in wrapper.plot_widget.items():
-                if isinstance(item, pg.LinearRegionItem):
-                    item.setVisible(self.show_bands)
+        self._apply_band_visibility()
+
+    def _apply_band_visibility(self):
+        plots = [self.plot_widget] if not self.is_split_view else [
+            wrapper.plot_widget for wrapper in self.individual_widgets.values()
+        ]
+        for plot_widget in plots:
+            for item in plot_widget.items():
+                band_index = getattr(item, '_eeg_band_index', None)
+                if band_index is not None:
+                    item.setVisible(
+                        self.display_mode != "Raw Data"
+                        and self.show_bands
+                        and self.band_visibility[band_index]
+                    )
 
     def toggle_sidebar(self):
         self.nav_visible = not self.nav_visible
@@ -1267,8 +1661,9 @@ class MultiChannelFFTApp(QMainWindow):
 
             self._csv_file   = open(path, 'w', newline='')
             self._csv_writer = csv.writer(self._csv_file)
+            value_prefix = "raw" if self.display_mode == "Raw Data" else "bin"
             header = ["timestamp"] + [
-                f"{EEG_10_20_LABELS[ch]}_bin{b}"
+                f"{EEG_10_20_LABELS[ch]}_{value_prefix}{b}"
                 for ch in self._record_channels
                 for b in range(DISPLAY_BINS)
             ]
@@ -1344,6 +1739,57 @@ class MultiChannelFFTApp(QMainWindow):
             self.plot_widget.setXRange(0, x_bin, padding=0)
             self.plot_widget.setYRange(0, y_max, padding=0)
 
+    def set_auto_scale(self, enabled):
+        self.auto_scale_y = enabled
+        if enabled:
+            self._apply_auto_y_range()
+
+    def _apply_auto_y_range(self):
+        active = list(self.curves.keys())
+        if not active:
+            return
+        maximum = float(np.max(self.fft_data_matrix[active]))
+        y_max = max(1.0, maximum * 1.12)
+        plots = [self.plot_widget] if not self.is_split_view else [
+            wrapper.plot_widget for wrapper in self.individual_widgets.values()
+        ]
+        for plot_widget in plots:
+            plot_widget.setYRange(0, y_max, padding=0)
+
+    def set_band_visibility(self, band_index, visible):
+        self.band_visibility[band_index] = visible
+        self._apply_band_visibility()
+
+    def apply_display_preset(self, preset_name):
+        if self.display_mode == "Raw Data":
+            presets = {
+                "Clinical": (DISPLAY_BINS, 1.0, 180),
+                "Alpha Focus": (DISPLAY_BINS, 1.0, 210),
+                "Full Spectrum": (DISPLAY_BINS, 1.0, 180),
+                "Presentation": (DISPLAY_BINS, 1.0, 260),
+            }
+        else:
+            presets = {
+                "Clinical": (45.0, 80.0, 180),
+                "Alpha Focus": (20.0, 80.0, 210),
+                "Full Spectrum": (SAMPLE_RATE / 2, 80.0, 180),
+                "Presentation": (45.0, 120.0, 260),
+            }
+        x_max, y_max, plot_height = presets.get(preset_name, presets["Clinical"])
+        self.x_max_spin.blockSignals(True)
+        self.y_max_spin.blockSignals(True)
+        self.x_max_spin.setValue(x_max)
+        self.y_max_spin.setValue(y_max)
+        self.x_max_spin.blockSignals(False)
+        self.y_max_spin.blockSignals(False)
+        self.size_slider.setValue(plot_height)
+        show_all_bands = preset_name != "Alpha Focus"
+        for band_index, band_check in enumerate(self.band_checks):
+            band_check.setChecked(show_all_bands or band_index == 2)
+        self.show_bands = True
+        self.band_btn.setText("⚡ Bands ON")
+        self._apply_band_visibility()
+
     def fit_axes_to_data(self):
         active = list(self.curves.keys())
         if not active:
@@ -1354,12 +1800,15 @@ class MultiChannelFFTApp(QMainWindow):
 
         self.x_max_spin.blockSignals(True)
         self.y_max_spin.blockSignals(True)
-        self.x_max_spin.setValue(SAMPLE_RATE / 2)
-        self.y_max_spin.setValue(round(y_max))
+        self.x_max_spin.setValue(RAW_WINDOW_BINS if self.display_mode == "Raw Data" else SAMPLE_RATE / 2)
+        if self.display_mode == "Raw Data":
+            self.y_max_spin.setValue(round(max(y_max, 1.0), 2))
+        else:
+            self.y_max_spin.setValue(round(y_max))
         self.x_max_spin.blockSignals(False)
         self.y_max_spin.blockSignals(False)
 
-        x_bin = self._hz_to_bin(SAMPLE_RATE / 2)
+        x_bin = self._x_max_bin()
         if self.is_split_view:
             for w in self.individual_widgets.values():
                 w.plot_widget.setXRange(0, x_bin, padding=0)
@@ -1405,12 +1854,18 @@ class MultiChannelFFTApp(QMainWindow):
                     if idx not in self.individual_widgets:
                         pw = pg.PlotWidget()
                         self._configure_split_plot(pw)
+                        self._connect_plot_hover(pw, idx)
                         wrapper = DraggablePlotWrapper(idx, pw, initial_height=self.current_plot_height)
                         row = active_count // self.split_columns
                         col = active_count %  self.split_columns
                         self.grid_layout.addWidget(wrapper, row, col)
                         self.individual_widgets[idx] = wrapper
-                        self.curves[idx] = pw.plot(pen=pg.mkPen(color=self.channel_colors[idx], width=2))
+                        self.curves[idx] = pw.plot(
+                            x=self._display_axis(),
+                            y=self._plot_channel_values(idx),
+                            pen=pg.mkPen(color=self.channel_colors[idx], width=2),
+                        )
+                        self._ensure_peak_marker(idx, pw)
                     else:
                         if not self.is_animating_layout:
                             w   = self.individual_widgets[idx]
@@ -1421,8 +1876,14 @@ class MultiChannelFFTApp(QMainWindow):
                 else:
                     if idx not in self.curves:
                         self.curves[idx] = self.plot_widget.plot(
-                            pen=pg.mkPen(color=self.channel_colors[idx], width=2)
+                            x=self._display_axis(),
+                            y=self._plot_channel_values(idx),
+                            pen=pg.mkPen(color=self.channel_colors[idx], width=2),
                         )
+                        self.plot_legend.addItem(
+                            self.curves[idx], EEG_10_20_LABELS[idx]
+                        )
+                        self._ensure_peak_marker(idx, self.plot_widget)
             else:
                 if self.is_split_view and idx in self.individual_widgets:
                     if self.grid_layout is not None:
@@ -1433,6 +1894,7 @@ class MultiChannelFFTApp(QMainWindow):
                         del self.curves[idx]
                 elif not self.is_split_view and idx in self.curves:
                     self.plot_widget.removeItem(self.curves[idx])
+                    self.plot_legend.removeItem(self.curves[idx])
                     del self.curves[idx]
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -1493,6 +1955,9 @@ class MultiChannelFFTApp(QMainWindow):
         self.curves.clear()
         self.individual_widgets.clear()
         self.band_region_items.clear()
+        self.plot_signal_proxies.clear()
+        self.peak_lines.clear()
+        self.peak_labels.clear()
 
         if self.is_split_view:
             self.split_btn.setText("Merge View")
@@ -1510,6 +1975,7 @@ class MultiChannelFFTApp(QMainWindow):
             scroll_content.dragMoveEvent  = self.grid_layout.handle_drag_move
             scroll_content.dropEvent      = self.grid_layout.handle_drop
             self.split_scroll.setWidget(scroll_content)
+            self.plot_container_layout.addWidget(self._create_graph_header())
             self.plot_container_layout.addWidget(self.split_scroll)
         else:
             self.split_btn.setText("Split View")
@@ -1677,10 +2143,19 @@ class MultiChannelFFTApp(QMainWindow):
                     self.dropped_packets += missed
             self._last_seq = seq
 
-            # Unpack uint16 → float32, normalise, apply calibration scalar
+            # Unpack uint16 → float32. In raw-data mode the firmware sends analog
+            # waveform samples in the ADC-like 0..65535 range. In FFT mode it sends
+            # magnitude values that must be normalised for plotting.
             raw = np.frombuffer(data_bytes, dtype='<u2').astype(np.float32)
-            raw *= (PROTO_SCALE * self.calibration_scalar * 65535.0)
-            self.fft_data_matrix[:] = raw.reshape(NUM_CHANNELS, DISPLAY_BINS)
+            if self.display_mode == "Raw Data":
+                raw_frame = raw.reshape(NUM_CHANNELS, DISPLAY_BINS)
+                sample_count = RAW_SAMPLES_PER_FRAME
+                new_samples = raw_frame[:, -sample_count:]
+                self._raw_pending = np.concatenate((self._raw_pending, new_samples), axis=1)
+            else:
+                raw *= PROTO_SCALE * self.calibration_scalar * 65535.0
+                self.fft_data_matrix[:] = raw.reshape(NUM_CHANNELS, DISPLAY_BINS)
+            self._frame_ready = True
 
             buf = buf[PROTO_FRAME_SIZE:]
 
@@ -1697,6 +2172,18 @@ class MultiChannelFFTApp(QMainWindow):
             crc &= 0xFFFF
         return crc
 
+    def _poll_serial(self):
+        if not self.ser or not self.ser.is_open:
+            return
+
+        try:
+            waiting = self.ser.in_waiting
+            if waiting > 0:
+                self._serial_buf += self.ser.read(waiting)
+                self._parse_serial_frames()
+        except Exception:
+            pass
+
     def update_plots(self):
         now = time.time()
         self.frame_count += 1
@@ -1712,7 +2199,6 @@ class MultiChannelFFTApp(QMainWindow):
             f"T+ {total_s // 60:02d}:{total_s % 60:02d}.{centiseconds:02d}"
         )
 
-        # Home cards mirror existing acquisition state; they do not create a second data path.
         if hasattr(self, "home_connection_value"):
             connected = bool(self.ser and self.ser.is_open)
             self.home_connection_value.setText("ONLINE" if connected else "OFFLINE")
@@ -1738,7 +2224,6 @@ class MultiChannelFFTApp(QMainWindow):
                 "Acquisition active" if connected else "Ready for acquisition"
             )
 
-        # Packet-loss / FPS label — update once/sec
         if now - self.last_fps_time >= 1.0:
             if self.ser and self.ser.is_open:
                 loss = (self.dropped_packets / max(1, self.packet_count)) * 100
@@ -1752,27 +2237,37 @@ class MultiChannelFFTApp(QMainWindow):
             self.frame_count   = 0
             self.last_fps_time = now
 
+        has_new_frame = self._frame_ready
+        if has_new_frame:
+            self._frame_ready = False
+
+        if self.display_mode == "Raw Data" and self._raw_pending.shape[1] > 0:
+            self._raw_sample_accumulator += dt * SAMPLE_RATE
+            sample_count = min(
+                int(self._raw_sample_accumulator),
+                self._raw_pending.shape[1],
+            )
+            if sample_count > 0:
+                self._raw_sample_accumulator -= sample_count
+                self.raw_data_matrix[:, :-sample_count] = self.raw_data_matrix[:, sample_count:]
+                self.raw_data_matrix[:, -sample_count:] = self._raw_pending[:, :sample_count]
+                self._raw_pending = self._raw_pending[:, sample_count:]
+                has_new_frame = True
+
         if self.is_frozen:
             return
 
-        # ── Ingest binary frames from STM32 ───────────────────────────────
-        if self.ser and self.ser.is_open:
-            try:
-                waiting = self.ser.in_waiting
-                if waiting > 0:
-                    self._serial_buf += self.ser.read(waiting)
-                    self._parse_serial_frames()
-            except Exception:
-                pass
-        else:
-            # No connection — hold last data, nothing to update
-            pass
+        if has_new_frame:
+            plot_data = self._plot_data_matrix()
+            for idx, curve in self.curves.items():
+                curve.setData(x=self._display_axis(), y=self._plot_channel_values(idx))
 
-        # ── Push to curves ─────────────────────────────────────────────────
-        for idx, curve in self.curves.items():
-            curve.setData(x=HZ_AXIS, y=self.fft_data_matrix[idx])
+            if self.auto_scale_y:
+                self._apply_auto_y_range()
+        if hasattr(self, "graph_status_label"):
+            source = "LIVE" if self.ser and self.ser.is_open else "PREVIEW"
+            self.graph_status_label.setText(f"{source}  /  {len(self.curves):02d} TRACES")
 
-        # ── Record ────────────────────────────────────────────────────────
         if self._recording and self._csv_writer:
             row = [f"{now:.4f}"] + [
                 self.fft_data_matrix[ch, b]
@@ -1780,7 +2275,6 @@ class MultiChannelFFTApp(QMainWindow):
                 for b in range(DISPLAY_BINS)
             ]
             self._csv_writer.writerow(row)
-            # Countdown
             if self._record_duration is not None:
                 self._record_elapsed += dt
                 remaining = max(0, self._record_duration - self._record_elapsed)
@@ -1788,13 +2282,17 @@ class MultiChannelFFTApp(QMainWindow):
                 if remaining <= 0:
                     self._stop_recording()
 
-        # ── Peak frequency labels (every 6 frames ≈ 10 Hz) ────────────────
         self._peak_tick += 1
         if self._peak_tick >= 6:
             self._peak_tick = 0
             if self.is_split_view:
                 for idx, wrapper in self.individual_widgets.items():
-                    wrapper.update_peak(self.fft_data_matrix[idx])
+                    wrapper.update_peak(self.fft_data_matrix[idx], self.display_mode)
+                    wrapper.update_quality(self.fft_data_matrix[idx])
+                    self._update_peak_marker(idx, self.fft_data_matrix[idx], wrapper.plot_widget)
+            else:
+                for idx in self.curves:
+                    self._update_peak_marker(idx, self.fft_data_matrix[idx], self.plot_widget)
 
     def closeEvent(self, event):
         if self._recording:

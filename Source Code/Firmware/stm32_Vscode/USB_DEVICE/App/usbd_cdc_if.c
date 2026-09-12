@@ -95,6 +95,8 @@ uint8_t UserTxBufferFS[APP_TX_DATA_SIZE];
 
 /* USER CODE BEGIN PRIVATE_VARIABLES */
 
+static volatile uint8_t stream_mode_command = 'F';
+
 /* USER CODE END PRIVATE_VARIABLES */
 
 /**
@@ -261,10 +263,22 @@ static int8_t CDC_Control_FS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
 static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 {
   /* USER CODE BEGIN 6 */
+  for (uint32_t i = 0U; i < *Len; ++i)
+  {
+    if (Buf[i] == (uint8_t)'R' || Buf[i] == (uint8_t)'F')
+    {
+      stream_mode_command = Buf[i];
+    }
+  }
   USBD_CDC_SetRxBuffer(&hUsbDeviceFS, &Buf[0]);
   USBD_CDC_ReceivePacket(&hUsbDeviceFS);
   return (USBD_OK);
   /* USER CODE END 6 */
+}
+
+uint8_t CDC_GetStreamMode(void)
+{
+  return stream_mode_command;
 }
 
 /**
