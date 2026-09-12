@@ -40,6 +40,8 @@
 #define NUM_CHANNELS     32U
 #define DISPLAY_BINS     128U
 #define PROTO_HDR_SIZE   7U
+#define FRAME_PERIOD_MS  20U
+#define SAMPLE_RATE      256U
 #define PROTO_DATA_BYTES (NUM_CHANNELS * DISPLAY_BINS * 2U)
 #define PROTO_FRAME_SIZE (PROTO_HDR_SIZE + PROTO_DATA_BYTES + 2U)
 #define STREAM_MODE_FFT  'F'
@@ -47,173 +49,138 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-
-/* Frame cadence. Keep this comfortably above 2x the highest channel
-   frequency below (see SINE_FREQ_MAX) to avoid aliasing between frames.
-   20 ms keeps the visual update smooth without pushing USB bandwidth too high. */
-#define FRAME_PERIOD_MS  20U
-#define SAMPLE_RATE      256U
-#define RAW_SAMPLES_PER_FRAME ((SAMPLE_RATE * FRAME_PERIOD_MS) / 1000U)
-
-/* All channels share the same frequency/phase so they visibly move in
-   lockstep. Change SINE_FREQ_STEP/PHASE_STEP back to non-zero if you
-   intentionally want per-channel diversity again -- just raise
-   FRAME_PERIOD_MS so the fastest channel is still safely sampled. */
-#define SINE_FREQ_BASE   2.0f
-#define SINE_FREQ_STEP   0.0f
-#define SINE_PHASE_STEP  0.0f
-
 /* USER CODE END PD */
 
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-/* USER CODE END PM */
-
 /* Private variables ---------------------------------------------------------*/
-static uint16_t g_seq = 0;
-static uint32_t g_raw_sample_index = 0;
+static uint16_t g_seq = 0U;
+static uint32_t g_raw_sample_index = 0U;
 
-/* USER CODE BEGIN PV */
-
-/* Double-buffered TX frames. These are ~8.2 KB each (16.4 KB total) --
-   far too large for the default main stack, so they MUST be static/global,
-   never a local array inside main(). */
+/* Enough room for the largest supported mode (FFT). */
 static uint8_t frame[2][PROTO_FRAME_SIZE];
-
-/* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-/* USER CODE BEGIN PFP */
-
-/* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 static uint16_t crc16_ccitt(const uint8_t *data, uint32_t len)
 {
   uint16_t crc = 0xFFFFU;
-
   for (uint32_t i = 0; i < len; ++i)
   {
     crc ^= (uint16_t)data[i] << 8;
-
-    for (uint8_t bit = 0; bit < 8; ++bit)
+    for (uint8_t bit = 0; bit < 8U; ++bit)
     {
-      if (crc & 0x8000U)
-      {
-        crc = (uint16_t)((crc << 1) ^ 0x1021U);
-      }
-      else
-      {
-        crc <<= 1;
-      }
+      crc = (crc & 0x8000U) ? (uint16_t)((crc << 1) ^ 0x1021U)
+                             : (uint16_t)(crc << 1);
     }
   }
-
   return crc;
+}
+
+static void write_u16_le(uint8_t **pp, uint16_t value)
+{
+  uint8_t *p = *pp;
+  p[0] = (uint8_t)(value & 0xFFU);
+  p[1] = (uint8_t)(value >> 8);
+  *pp += 2;
 }
 
 static uint16_t clamp_u16(float value)
 {
-  if (value < 0.0f)
-  {
-    return 0U;
-  }
-  if (value > 65535.0f)
-  {
-    return 65535U;
-  }
+  if (value <= 0.0f) return 0U;
+  if (value >= 65535.0f) return 65535U;
   return (uint16_t)value;
 }
 
+/* Test waveform only. Replace this with your ADC/DMA samples in the real build. */
 static float raw_test_sample(uint16_t ch, uint32_t sample_index)
 {
-  const float phase = (float)ch * 0.35f;
-
-  /* Smooth analog sine wave. This should look like a clean time-domain trace in
-     raw-data mode, without harmonics that distort the waveform. */
+  const float phase = (float)ch * 0.20f;
   const float signal = sinf(2.0f * (float)M_PI *
                             ((float)sample_index * 8.0f / (float)SAMPLE_RATE + phase));
-
   return 32768.0f + signal * 24000.0f;
 }
 
+/* Test FFT data only. */
 static float fft_test_sample(uint16_t ch, uint16_t bin, float t)
 {
   const float freq_hz = (float)bin;
   const float offset = (float)ch * 0.6f;
+  const float targets[4] = {8.0f + offset, 18.0f + offset,
+                            32.0f + offset, 58.0f + offset};
+  const float widths[4] = {1.3f, 1.4f, 2.0f, 2.5f};
   float total = 0.0f;
 
-  /* Create a few narrow spectral spikes. These are intentionally separate,
-     sharp peaks so the FFT view looks like a frequency-domain plot instead of a sine wave. */
-  const float targets[4] = { 8.0f + offset, 18.0f + offset, 32.0f + offset, 58.0f + offset };
-  const float widths[4] = { 1.3f, 1.4f, 2.0f, 2.5f };
-
-  for (uint8_t peak_index = 0; peak_index < 4U; ++peak_index)
+  for (uint8_t i = 0; i < 4U; ++i)
   {
-    const float target_hz = targets[peak_index];
-    const float width_hz = widths[peak_index];
-    const float delta = freq_hz - target_hz;
-    total += 28000.0f * expf(-(delta * delta) / (2.0f * width_hz * width_hz));
+    const float delta = freq_hz - targets[i];
+    total += 28000.0f * expf(-(delta * delta) /
+                             (2.0f * widths[i] * widths[i]));
   }
 
-  /* Modulate the peak magnitudes slightly in time so the FFT plot looks alive. */
-  const float envelope = 0.8f + 0.2f * sinf(2.0f * (float)M_PI * (t * 0.5f + (float)ch * 0.13f));
-
+  const float envelope = 0.8f +
+      0.2f * sinf(2.0f * (float)M_PI *
+                  (t * 0.5f + (float)ch * 0.13f));
   return envelope * total + 200.0f;
 }
 
-static void build_sine_frame(uint8_t *frame_buf, uint8_t stream_mode)
+/*
+ * RAW packet:
+ *   Uses the same 32 x 128 payload shape as FFT packets so the existing
+ *   Python parser can consume both modes without changing frame boundaries.
+ * The waveform clock advances by the complete 128-sample block because the
+ * current Python protocol appends every value in the fixed-size packet.
+ */
+static uint16_t build_raw_frame(uint8_t *frame_buf)
 {
   uint8_t *p = frame_buf;
+  const uint16_t seq = g_seq++;
+  const uint32_t start = g_raw_sample_index;
 
-  /* sync */
   *p++ = PROTO_SYNC0;
   *p++ = PROTO_SYNC1;
-
-  uint16_t seq = g_seq++;
-  memcpy(p, &seq, 2);
-  p += 2;
-
+  write_u16_le(&p, seq);
   *p++ = (uint8_t)NUM_CHANNELS;
+  write_u16_le(&p, DISPLAY_BINS);
 
-  uint16_t nbins = DISPLAY_BINS;
-  memcpy(p, &nbins, 2);
-  p += 2;
+  for (uint16_t ch = 0; ch < NUM_CHANNELS; ++ch)
+  {
+    for (uint16_t n = 0; n < DISPLAY_BINS; ++n)
+    {
+      write_u16_le(&p, clamp_u16(raw_test_sample(ch, start + n)));
+    }
+  }
 
-  /* p is now at PROTO_HDR_SIZE (7), an odd offset -- do NOT cast this to
-     uint16_t* and dereference it directly, that's an unaligned/UB access.
-     Write each sample through memcpy instead. */
-  uint32_t tick = HAL_GetTick();
-  const float t = (float)tick / 1000.0f;
-  const uint32_t raw_start = g_raw_sample_index;
+  write_u16_le(&p, crc16_ccitt(frame_buf + PROTO_HDR_SIZE, PROTO_DATA_BYTES));
+  g_raw_sample_index += DISPLAY_BINS;
+  return (uint16_t)(p - frame_buf);
+}
+
+static uint16_t build_fft_frame(uint8_t *frame_buf)
+{
+  uint8_t *p = frame_buf;
+  const uint16_t seq = g_seq++;
+  const float t = (float)HAL_GetTick() / 1000.0f;
+
+  *p++ = PROTO_SYNC0;
+  *p++ = PROTO_SYNC1;
+  write_u16_le(&p, seq);
+  *p++ = (uint8_t)NUM_CHANNELS;
+  write_u16_le(&p, DISPLAY_BINS);
 
   for (uint16_t ch = 0; ch < NUM_CHANNELS; ++ch)
   {
     for (uint16_t bin = 0; bin < DISPLAY_BINS; ++bin)
     {
-      float mag = stream_mode == STREAM_MODE_RAW
-          ? raw_test_sample(ch, raw_start + bin)
-          : fft_test_sample(ch, bin, t);
-
-      uint16_t sample = clamp_u16(mag);
-      memcpy(p, &sample, 2);
-      p += 2;
+      write_u16_le(&p, clamp_u16(fft_test_sample(ch, bin, t)));
     }
   }
 
-  uint16_t crc = crc16_ccitt(frame_buf + PROTO_HDR_SIZE, PROTO_DATA_BYTES);
-  memcpy(p, &crc, 2);
-
-  if (stream_mode == STREAM_MODE_RAW)
-  {
-    g_raw_sample_index += RAW_SAMPLES_PER_FRAME;
-  }
+  write_u16_le(&p, crc16_ccitt(frame_buf + PROTO_HDR_SIZE, PROTO_DATA_BYTES));
+  return (uint16_t)(p - frame_buf);
 }
-
 /* USER CODE END 0 */
 
 /**
@@ -223,79 +190,61 @@ static void build_sine_frame(uint8_t *frame_buf, uint8_t stream_mode)
 int main(void)
 {
 
-  /* USER CODE BEGIN 1 */
-
-  /* USER CODE END 1 */
-
-  /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
-
-  /* Configure the system clock */
   SystemClock_Config();
-
-  /* USER CODE BEGIN SysInit */
-
-  /* USER CODE END SysInit */
-
-  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_USB_DEVICE_Init();
-  /* USER CODE BEGIN 2 */
 
-  /* USER CODE END 2 */
-
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
   uint8_t frame_index = 0U;
-  uint32_t last_tx = 0U;
-  uint32_t tx_drop_count = 0U; /* bumped whenever CDC_Transmit_FS is busy */
-  uint8_t stream_mode = STREAM_MODE_FFT;
+  uint8_t frame_ready = 0U;
+  uint8_t stream_mode = STREAM_MODE_RAW;
+  uint16_t frame_len = 0U;
+  uint32_t next_build = HAL_GetTick() + FRAME_PERIOD_MS;
 
   while (1)
   {
-    uint32_t now = HAL_GetTick();
+    const uint32_t now = HAL_GetTick();
 
-    uint8_t requested_mode = CDC_GetStreamMode();
+    const uint8_t requested_mode = CDC_GetStreamMode();
     if (requested_mode == STREAM_MODE_RAW || requested_mode == STREAM_MODE_FFT)
     {
-      stream_mode = requested_mode;
+      if (requested_mode != stream_mode)
+      {
+        stream_mode = requested_mode;
+        g_raw_sample_index = 0U;
+        next_build = now + FRAME_PERIOD_MS;
+      }
     }
 
-    /* Non-blocking transmit gate. No HAL_Delay() in this loop, so this
-       check runs every iteration instead of being quantized to a fixed
-       delay step -- the frame cadence now matches FRAME_PERIOD_MS. */
-    if ((now - last_tx) >= FRAME_PERIOD_MS)
+    /* Build once. If USB is busy, this exact frame is retried; it is never rebuilt. */
+    if (!frame_ready && (int32_t)(now - next_build) >= 0)
     {
-      build_sine_frame(frame[frame_index], stream_mode);
-
-      if (CDC_Transmit_FS(frame[frame_index], PROTO_FRAME_SIZE) == USBD_OK)
+      if (stream_mode == STREAM_MODE_RAW)
       {
-        frame_index ^= 1U;
-        last_tx = now;
+        frame_len = build_raw_frame(frame[frame_index]);
       }
       else
       {
-        /* Host not keeping up / endpoint busy. Don't advance last_tx so
-           we retry ASAP on the next loop iteration instead of waiting
-           out a fixed delay; just track it so it's visible if it happens. */
-        tx_drop_count++;
+        frame_len = build_fft_frame(frame[frame_index]);
+      }
+
+      frame_ready = 1U;
+      next_build += FRAME_PERIOD_MS;
+
+      /* If the CPU was delayed for a long time, don't burst-build old frames. */
+      if ((int32_t)(now - next_build) > (int32_t)FRAME_PERIOD_MS)
+      {
+        next_build = now + FRAME_PERIOD_MS;
       }
     }
 
-    
-    
-     
-    /* USER CODE END WHILE */
-
-    /* USER CODE BEGIN 3 */
+    /* USB CDC is asynchronous. Only advance the double buffer after success. */
+    if (frame_ready && CDC_Transmit_FS(frame[frame_index], frame_len) == USBD_OK)
+    {
+      frame_index ^= 1U;
+      frame_ready = 0U;
+    }
   }
-  /* USER CODE END 3 */
 }
 
 /**
@@ -334,12 +283,12 @@ void SystemClock_Config(void)
   */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
   {
     Error_Handler();
   }

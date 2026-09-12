@@ -130,7 +130,7 @@ def add_band_lines(plot_widget, show=True):
 
 # ── Draggable plot panel ───────────────────────────────────────────────────────
 class DraggablePlotWrapper(QFrame):
-    def __init__(self, channel_idx, plot_widget, initial_height=180, parent=None):
+    def __init__(self, channel_idx, plot_widget, initial_height=180, parent=None, channel_label=None):
         super().__init__(parent)
         self.channel_idx = channel_idx
         self.plot_widget  = plot_widget
@@ -144,7 +144,7 @@ class DraggablePlotWrapper(QFrame):
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(2)
 
-        ch_label = EEG_10_20_LABELS[channel_idx]
+        ch_label = channel_label if channel_label is not None else EEG_10_20_LABELS[channel_idx]
 
         title_row = QHBoxLayout()
         self.title_bar = QLabel(f" ☰  {ch_label}  (CH {channel_idx+1:02d})")
@@ -698,8 +698,9 @@ class PreferencesDialog(QDialog):
         stream_layout = QVBoxLayout(stream)
         stream_layout.addWidget(QLabel("Display mode when selecting the analyzer"))
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["FFT", "Raw Data"])
-        self.mode_combo.setCurrentText(display_mode)
+        self.mode_combo.addItems(["FFT", "EEG Raw", "Sensors", "Oscilloscope"])
+        pref_mode = {"Raw Data": "EEG Raw"}.get(display_mode, display_mode)
+        self.mode_combo.setCurrentText(pref_mode)
         stream_layout.addWidget(self.mode_combo)
         root.addWidget(stream)
 
@@ -859,6 +860,11 @@ class MultiChannelFFTApp(QMainWindow):
         self._record_elapsed  = 0.0
         self._record_timer    = None
         self.display_mode     = "FFT"
+        # UI workspace selection is separate from the display renderer so the
+        # STM32 can be told exactly which acquisition/view mode is active.
+        self.workspace_mode   = "FFT"
+        self.custom_sensors_mode = False   # True while the "Custom Sensors" workspace is active
+        self.active_sensor_count = 4       # kept in sync with the sidebar checkboxes
         self.show_peak_markers = True
         self.band_visibility   = [True] * len(EEG_BANDS)
         self.peak_lines        = {}
@@ -885,7 +891,8 @@ class MultiChannelFFTApp(QMainWindow):
         # Raw acquisition uses a ring buffer. Samples are appended in-place and
         # the GUI materializes one chronological view only when new data arrives.
         self.raw_data_matrix = np.zeros((NUM_CHANNELS, RAW_WINDOW_BINS), dtype=np.float32)
-        self.raw_x_axis = np.arange(RAW_WINDOW_BINS, dtype=np.float32)
+        # Oscilloscope-style time axis: sample index -> seconds
+        self.raw_x_axis = np.arange(RAW_WINDOW_BINS, dtype=np.float32) / SAMPLE_RATE
         self._raw_ring_write = 0
         self._raw_ring_count = 0
         self._raw_new_samples = 0
@@ -1117,36 +1124,76 @@ class MultiChannelFFTApp(QMainWindow):
         for button in self.dashboard_mode_buttons:
             button.setChecked(False)
         self.workspace_label.setText("OVERVIEW")
-        self._set_dashboard_controls_visible(False)
+        self._set_dashboard_controls_visible(True)
+        self._set_custom_controls_visible(self.workspace_mode == "Sensors")
         self.nav_frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.nav_frame.setMinimumHeight(0)
         self.nav_frame.setMaximumHeight(16777215)
         self.layout_core.setAlignment(self.nav_frame, Qt.AlignTop)
 
-    def show_dashboard(self, mode=None):
-        if mode is not None and mode != self.display_mode:
-            self.mode_combo.setCurrentText(mode)
+    def select_workspace_mode(self, mode):
+        """Select one of the four acquisition/view workspaces and notify STM32.
+
+        Existing firmware commands F/R remain unchanged for FFT/EEG Raw.
+        Sensors and General Oscilloscope use the explicit S/O mode bytes; the
+        STM32 firmware must implement those two mode commands.
+        """
+        mode = str(mode)
+        if mode not in ("FFT", "EEG Raw", "Sensors", "Oscilloscope"):
+            return
+        self.workspace_mode = mode
+        self.custom_sensors_mode = mode == "Sensors"
+        display_mode = "FFT" if mode == "FFT" else "Raw Data"
+        if self.display_mode != display_mode:
+            self.set_display_mode(display_mode)
+        self._refresh_workspace_ui()
+
+    def _send_workspace_command(self, mode=None):
+        mode = mode or self.workspace_mode
+        command = {
+            "FFT": b"F",
+            "EEG Raw": b"R",
+            "Sensors": b"S",
+            "Oscilloscope": b"O",
+        }.get(mode)
+        if command is not None:
+            self._send_stream_command(command)
+
+    def _refresh_workspace_ui(self):
         self.content_stack.setCurrentWidget(self.plot_container)
         self.home_nav_btn.setChecked(False)
         for button in self.dashboard_mode_buttons:
-            button.setChecked(button.property("dashboard_mode") == self.display_mode)
-        self.workspace_label.setText(
-            "RAW OSCILLOSCOPE" if self.display_mode == "Raw Data" else "FFT WORKSPACE"
-        )
+            button.setChecked(button.property("dashboard_mode") == self.workspace_mode)
+        names = {
+            "FFT": ("FFT WORKSPACE", "Frequency-domain EEG spectrum  |  0–128 Hz"),
+            "EEG Raw": ("EEG RAW OSCILLOSCOPE", "EEG waveform  |  Voltage (V) vs Time (s)"),
+            "Sensors": ("SENSOR OSCILLOSCOPE", f"{self.active_sensor_count} active sensor channel(s)  |  Voltage (V) vs Time (s)"),
+            "Oscilloscope": ("GENERAL OSCILLOSCOPE", "General analog waveform  |  Voltage (V) vs Time (s)"),
+        }
+        title, detail = names[self.workspace_mode]
+        self.workspace_label.setText(title)
+        self.graph_title_label.setText(title)
+        self.graph_detail_label.setText(detail)
         self._set_dashboard_controls_visible(True)
-        self.nav_frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
-        self.nav_frame.setMinimumHeight(0)
-        self.nav_frame.setMaximumHeight(16777215)
-        self.layout_core.setAlignment(self.nav_frame, Qt.Alignment())
+        self._set_custom_controls_visible(self.workspace_mode == "Sensors")
+        self._refresh_channel_labels()
+        self._send_workspace_command()
+
+    def show_dashboard(self, mode=None):
+        if mode is not None:
+            self.select_workspace_mode({"Raw Data": "EEG Raw"}.get(mode, mode))
+        else:
+            self._refresh_workspace_ui()
 
     def show_custom_dashboard(self):
-        self.show_dashboard()
-        for button in self.dashboard_mode_buttons:
-            button.setChecked(button is self.custom_nav_btn)
-        self._set_status(
-            "Custom Sensors: choose active channels in the Electrode Matrix.",
-            self.ui_accent,
-        )
+        self.select_workspace_mode("Sensors")
+
+    def show_oscilloscope_dashboard(self):
+        self.select_workspace_mode("Oscilloscope")
+
+    def _set_custom_controls_visible(self, visible):
+        for widget in getattr(self, "custom_only_widgets", []):
+            widget.setVisible(visible)
 
     @staticmethod
     def _set_layout_item_visible(item, visible):
@@ -1188,8 +1235,9 @@ class MultiChannelFFTApp(QMainWindow):
             self.home_preview_enabled = dialog.preview_check.isChecked()
             self.home_preview.setVisible(self.home_preview_enabled)
             self._apply_ui_accent()
-            if dialog.mode_combo.currentText() != self.display_mode:
-                self.mode_combo.setCurrentText(dialog.mode_combo.currentText())
+            selected = dialog.mode_combo.currentText()
+            if selected != self.workspace_mode:
+                self.mode_combo.setCurrentText(selected)
             self._set_status("Preferences applied.", self.ui_accent)
 
     def _apply_ui_accent(self):
@@ -1344,10 +1392,34 @@ class MultiChannelFFTApp(QMainWindow):
         mode_label.setStyleSheet("color:#858585; font-size:10px; font-weight:bold; padding-left:8px;")
         layout.addWidget(mode_label)
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["FFT", "Raw Data"])
-        self.mode_combo.setFixedWidth(88)
-        self.mode_combo.currentTextChanged.connect(self.set_display_mode)
+        self.mode_combo.addItems(["FFT", "EEG Raw", "Sensors", "Oscilloscope"])
+        self.mode_combo.setFixedWidth(118)
+        self.mode_combo.currentTextChanged.connect(self.select_workspace_mode)
         layout.addWidget(self.mode_combo)
+
+        toolbar_divider()
+        sensors_group_label = toolbar_group("SENSORS")
+
+        sensors_count_label = QLabel("Active:")
+        sensors_count_label.setStyleSheet("color:#858585; font-size:10px; font-weight:bold; padding-left:4px;")
+        layout.addWidget(sensors_count_label)
+        self.dashboard_toolbar_widgets.append(sensors_count_label)
+
+        self.sensor_count_spin = QSpinBox()
+        self.sensor_count_spin.setRange(1, NUM_CHANNELS)
+        self.sensor_count_spin.setValue(self.active_sensor_count)
+        self.sensor_count_spin.setFixedWidth(56)
+        self.sensor_count_spin.setToolTip(
+            f"Number of active sensors/channels (1–{NUM_CHANNELS}, limited by the "
+            "firmware's fixed frame size)"
+        )
+        self.sensor_count_spin.valueChanged.connect(self.set_active_sensor_count)
+        layout.addWidget(self.sensor_count_spin)
+        self.dashboard_toolbar_widgets.append(self.sensor_count_spin)
+
+        # These three widgets are only shown while the Custom Sensors workspace
+        # is active; _set_custom_controls_visible() toggles them.
+        self.custom_only_widgets = [sensors_group_label, sensors_count_label, self.sensor_count_spin]
 
         toolbar_divider()
         toolbar_group("LAYOUT")
@@ -1481,7 +1553,7 @@ class MultiChannelFFTApp(QMainWindow):
     # ══════════════════════════════════════════════════════════════════════════
     def init_left_navigation_menu(self, parent_layout):
         self.nav_frame = QFrame()
-        self.nav_frame.setFixedWidth(260)
+        self.nav_frame.setFixedWidth(310)
         self.nav_frame.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         self.nav_frame.setStyleSheet(
             "background-color: #20282d; border-radius: 5px; border: 1px solid #334047;"
@@ -1515,30 +1587,38 @@ class MultiChannelFFTApp(QMainWindow):
         self.home_nav_btn.clicked.connect(self.show_home)
         nav_layout.addWidget(self.home_nav_btn)
 
-        self.dashboard_nav_btn = QPushButton("▦  FFT Dashboard")
+        nav_layout.addWidget(section_label("00  SIGNAL TYPE"))
+        self.dashboard_nav_btn = QPushButton("▦  FFT")
         self.dashboard_nav_btn.setCheckable(True)
         self.dashboard_nav_btn.setProperty("dashboard_mode", "FFT")
         self.dashboard_nav_btn.setFixedHeight(34)
-        self.dashboard_nav_btn.clicked.connect(lambda: self.show_dashboard("FFT"))
+        self.dashboard_nav_btn.clicked.connect(lambda: self.select_workspace_mode("FFT"))
         nav_layout.addWidget(self.dashboard_nav_btn)
 
-        self.raw_nav_btn = QPushButton("∿  Raw Oscilloscope")
+        self.raw_nav_btn = QPushButton("∿  EEG Raw Data")
         self.raw_nav_btn.setCheckable(True)
-        self.raw_nav_btn.setProperty("dashboard_mode", "Raw Data")
+        self.raw_nav_btn.setProperty("dashboard_mode", "EEG Raw")
         self.raw_nav_btn.setFixedHeight(34)
-        self.raw_nav_btn.clicked.connect(lambda: self.show_dashboard("Raw Data"))
+        self.raw_nav_btn.clicked.connect(lambda: self.select_workspace_mode("EEG Raw"))
         nav_layout.addWidget(self.raw_nav_btn)
 
-        self.custom_nav_btn = QPushButton("▤  Custom Sensors")
+        self.custom_nav_btn = QPushButton("▤  Sensors (1–32)")
         self.custom_nav_btn.setCheckable(True)
-        self.custom_nav_btn.setProperty("dashboard_mode", "Custom")
+        self.custom_nav_btn.setProperty("dashboard_mode", "Sensors")
         self.custom_nav_btn.setFixedHeight(34)
-        self.custom_nav_btn.clicked.connect(self.show_custom_dashboard)
+        self.custom_nav_btn.clicked.connect(lambda: self.select_workspace_mode("Sensors"))
         nav_layout.addWidget(self.custom_nav_btn)
+
+        self.osc_nav_btn = QPushButton("◉  General Oscilloscope")
+        self.osc_nav_btn.setCheckable(True)
+        self.osc_nav_btn.setProperty("dashboard_mode", "Oscilloscope")
+        self.osc_nav_btn.setFixedHeight(34)
+        self.osc_nav_btn.clicked.connect(lambda: self.select_workspace_mode("Oscilloscope"))
+        nav_layout.addWidget(self.osc_nav_btn)
+
         self.dashboard_mode_buttons = [
-            self.dashboard_nav_btn,
-            self.raw_nav_btn,
-            self.custom_nav_btn,
+            self.dashboard_nav_btn, self.raw_nav_btn,
+            self.custom_nav_btn, self.osc_nav_btn,
         ]
         nav_layout.addWidget(make_separator())
 
@@ -1668,7 +1748,7 @@ class MultiChannelFFTApp(QMainWindow):
             row_l  = QHBoxLayout(row_w)
             row_l.setContentsMargins(0, 0, 0, 0)
 
-            cb = QCheckBox(f"({EEG_10_20_LABELS[i]}) Ch {i+1:02d}")
+            cb = QCheckBox(self._checkbox_text(i))
             cb.setChecked(i < 4)
             cb.stateChanged.connect(self.update_channel_visibility)
             row_l.addWidget(cb)
@@ -1723,25 +1803,58 @@ class MultiChannelFFTApp(QMainWindow):
             return self._raw_render_matrix
         return self.fft_data_matrix
 
+    def _checkbox_text(self, idx):
+        return f"({self._channel_label(idx)}) Ch {idx + 1:02d}"
+
+    def _refresh_channel_labels(self):
+        """Re-label the Electrode Matrix checkboxes and any live legend/title
+        text after switching in or out of Custom Sensors mode."""
+        if not hasattr(self, "checkboxes"):
+            return
+        for i, cb in enumerate(self.checkboxes):
+            cb.setText(self._checkbox_text(i))
+        if self.is_split_view:
+            for idx, wrapper in self.individual_widgets.items():
+                wrapper.title_bar.setText(f" ☰  {self._channel_label(idx)}  (CH {idx+1:02d})")
+        else:
+            for idx, curve in self.curves.items():
+                if self.plot_legend is not None:
+                    self.plot_legend.removeItem(curve)
+                    self.plot_legend.addItem(curve, self._channel_label(idx))
+
+    def _channel_label(self, idx):
+        """Display name for a channel: EEG 10-20 electrode name, or a generic
+        sensor label while the Custom Sensors workspace is active."""
+        if self.custom_sensors_mode:
+            return f"Sensor {idx + 1:02d}"
+        return EEG_10_20_LABELS[idx]
+
+    def _adc_to_volts(self, raw_adc):
+        """Map the firmware's 0..65535 ADC code range onto 0..ADC_REFERENCE_V volts."""
+        return raw_adc / 65535.0 * ADC_REFERENCE_V
+
     def _plot_channel_values(self, channel_idx):
         data = self._plot_data_matrix()[channel_idx]
         if self.display_mode != "Raw Data":
             return data
 
-        visible_channels = list(self.curves)
+        volts = self._adc_to_volts(data)
         if self.is_split_view:
-            return (data - 32768.0) / 24000.0 * 0.38 + 0.5
+            return volts
+
+        visible_channels = list(self.curves)
         try:
             lane = visible_channels.index(channel_idx)
         except ValueError:
             lane = channel_idx
-        baseline = max(0, len(visible_channels) - lane - 1)
-        centered = (data - 32768.0) / 24000.0
-        return baseline + centered * 0.38
+        baseline = max(0, len(visible_channels) - lane - 1) * ADC_REFERENCE_V
+        return baseline + volts
 
     def _y_max(self):
         if self.display_mode == "Raw Data":
-            return 1.0 if self.is_split_view else max(1.0, float(len(self.curves)))
+            return ADC_REFERENCE_V if self.is_split_view else max(
+                ADC_REFERENCE_V, ADC_REFERENCE_V * float(len(self.curves))
+            )
         return self.y_max_spin.value() if hasattr(self, "y_max_spin") else 80
 
     def init_plot_display(self):
@@ -1803,10 +1916,12 @@ class MultiChannelFFTApp(QMainWindow):
         point = view_box.mapSceneToView(position)
         data_matrix = self._plot_data_matrix()
         max_index = data_matrix.shape[1] - 1
-        bin_index = int(np.clip(round(point.x()), 0, max_index))
         if self.display_mode == "Raw Data":
-            horizontal_text = f"sample {bin_index:03d}"
+            # The x-axis is time in seconds; convert back to a sample index.
+            bin_index = int(np.clip(round(point.x() * SAMPLE_RATE), 0, max_index))
+            horizontal_text = f"{point.x():.3f} s"
         else:
+            bin_index = int(np.clip(round(point.x()), 0, max_index))
             horizontal_value = HZ_AXIS[bin_index]
             horizontal_text = f"{horizontal_value:.1f} Hz"
         if channel_idx is None:
@@ -1822,11 +1937,18 @@ class MultiChannelFFTApp(QMainWindow):
             else:
                 channel_idx = max(active, key=lambda idx: data_matrix[idx, bin_index])
         magnitude = data_matrix[channel_idx, bin_index]
-        label = EEG_10_20_LABELS[channel_idx]
-        value_name = "raw" if self.display_mode == "Raw Data" else "mag"
-        self.cursor_readout.setText(
-            f"{label}  |  {horizontal_text}  |  {magnitude:.2f} {value_name}"
-        )
+        label = self._channel_label(channel_idx)
+        if self.display_mode == "Raw Data":
+            magnitude = self._adc_to_volts(magnitude)
+            value_name = "V"
+            self.cursor_readout.setText(
+                f"{label}  |  {horizontal_text}  |  {magnitude:.3f} {value_name}"
+            )
+        else:
+            value_name = "mag"
+            self.cursor_readout.setText(
+                f"{label}  |  {horizontal_text}  |  {magnitude:.2f} {value_name}"
+            )
 
     def _ensure_peak_marker(self, channel_idx, plot_widget):
         key = (id(plot_widget), channel_idx)
@@ -1867,19 +1989,20 @@ class MultiChannelFFTApp(QMainWindow):
 
     def _mode_geometry_config(self):
         if self.display_mode == "Raw Data":
+            full_window_s = round(RAW_WINDOW_BINS / SAMPLE_RATE, 2)
             return {
-                "x_label": "X Max (samples):",
-                "x_min": 1.0,
-                "x_max": float(RAW_WINDOW_BINS),
-                "x_decimals": 0,
-                "x_step": 1.0,
-                "x_value": float(RAW_WINDOW_BINS),
-                "y_label": "Trace lanes:",
-                "y_min": 0.0,
-                "y_max": 65535.0,
-                "y_decimals": 0,
-                "y_step": 1000.0,
-                "y_value": 65535.0,
+                "x_label": "Time span (s):",
+                "x_min": round(1.0 / SAMPLE_RATE, 3),
+                "x_max": full_window_s,
+                "x_decimals": 2,
+                "x_step": 0.05,
+                "x_value": full_window_s,
+                "y_label": "Y Max (V):",
+                "y_min": 0.1,
+                "y_max": round(ADC_REFERENCE_V * NUM_CHANNELS, 1),
+                "y_decimals": 2,
+                "y_step": 0.1,
+                "y_value": ADC_REFERENCE_V,
             }
         return {
             "x_label": "X Max (Hz):",
@@ -1898,9 +2021,9 @@ class MultiChannelFFTApp(QMainWindow):
 
     def _style_plot_widget(self, plot_widget, step_hz):
         plot_widget.setBackground('#202024')
-        left_label = 'Trace lanes' if self.display_mode == "Raw Data" else 'Magnitude'
+        left_label = 'Voltage (V)' if self.display_mode == "Raw Data" else 'Magnitude'
         plot_widget.setLabel('left', left_label, **{'color': '#858585', 'font-size': '11px'})
-        bottom_label = 'Bin index' if self.display_mode == "Raw Data" else 'Frequency (Hz)'
+        bottom_label = 'Time (s)' if self.display_mode == "Raw Data" else 'Frequency (Hz)'
         plot_widget.setLabel('bottom', bottom_label, **{'color': '#858585', 'font-size': '11px'})
         plot_item = plot_widget.getPlotItem()
         pg.setConfigOptions(antialias=False)
@@ -1921,10 +2044,20 @@ class MultiChannelFFTApp(QMainWindow):
         plot_widget.getAxis('bottom').setTicks([self._build_hz_ticks(step_hz=step_hz)])
 
     def _build_hz_ticks(self, step_hz=8):
-        """Return major tick list [(bin_position, 'N Hz'), ...] for every step_hz Hz."""
+        """Return major tick list [(position, label), ...].
+
+        In Raw Data (oscilloscope) mode, positions/labels are in seconds.
+        In FFT mode, positions are bin indices labeled with their Hz value.
+        """
         ticks = []
         if self.display_mode == "Raw Data":
-            return [(index, str(index)) for index in range(0, RAW_WINDOW_BINS, 64)]
+            total_seconds = RAW_WINDOW_BINS / SAMPLE_RATE
+            step_s = max(0.01, round(total_seconds / 8, 2))
+            t = 0.0
+            while t <= total_seconds + 1e-9:
+                ticks.append((t, f"{t:.2f}s"))
+                t += step_s
+            return ticks
         hz = 0
         while hz <= SAMPLE_RATE / 2:
             ticks.append((self._hz_to_bin(hz), f"{hz}"))
@@ -1933,7 +2066,8 @@ class MultiChannelFFTApp(QMainWindow):
 
     def set_display_mode(self, mode):
         self.display_mode = mode
-        self._send_stream_command(b"R" if mode == "Raw Data" else b"F")
+        # Renderer selection is separate from the STM32 workspace command.
+        # select_workspace_mode() owns the protocol mode byte.
         raw_mode = mode == "Raw Data"
         if raw_mode:
             self._raw_ring_write = 0
@@ -1966,20 +2100,20 @@ class MultiChannelFFTApp(QMainWindow):
         for plot_widget in plots:
             plot_widget.setLabel(
                 'left',
-                'Trace lanes' if raw_mode else 'Magnitude',
+                'Voltage (V)' if raw_mode else 'Magnitude',
                 **{'color': '#858585', 'font-size': '11px'},
             )
             plot_widget.setLabel(
                 'bottom',
-                'Bin index' if raw_mode else 'Frequency (Hz)',
+                'Time (s)' if raw_mode else 'Frequency (Hz)',
                 **{'color': '#858585', 'font-size': '11px'},
             )
             plot_widget.setXRange(0, self._x_max_bin(), padding=0)
             plot_widget.getAxis('bottom').setTicks([self._build_hz_ticks()])
 
-        self.graph_title_label.setText("RAW FRAME DATA" if raw_mode else "LIVE SPECTRUM")
+        self.graph_title_label.setText("RAW OSCILLOSCOPE" if raw_mode else "LIVE SPECTRUM")
         self.graph_detail_label.setText(
-            "Analog sample stream  |  raw waveform view"
+            "Analog waveform  |  Voltage (V) vs Time (s)"
             if raw_mode else "Magnitude by frequency  |  0–128 Hz"
         )
         self.plot_legend.setVisible(not raw_mode)
@@ -2080,7 +2214,9 @@ class MultiChannelFFTApp(QMainWindow):
 
     def toggle_recording(self):
         if not self._recording:
-            dlg = RecordingDialog(EEG_10_20_LABELS, parent=self)
+            dlg = RecordingDialog(
+                [self._channel_label(i) for i in range(NUM_CHANNELS)], parent=self
+            )
             dlg.set_active_channels(list(self.curves.keys()))
             if dlg.exec_() != QDialog.Accepted:
                 return
@@ -2101,7 +2237,7 @@ class MultiChannelFFTApp(QMainWindow):
             value_prefix = "raw" if self.display_mode == "Raw Data" else "bin"
             sample_count = RAW_WINDOW_BINS if self.display_mode == "Raw Data" else DISPLAY_BINS
             header = ["timestamp"] + [
-                f"{EEG_10_20_LABELS[ch]}_{value_prefix}{b}"
+                f"{self._channel_label(ch)}_{value_prefix}{b}"
                 for ch in self._record_channels
                 for b in range(sample_count)
             ]
@@ -2203,11 +2339,13 @@ class MultiChannelFFTApp(QMainWindow):
 
     def apply_display_preset(self, preset_name):
         if self.display_mode == "Raw Data":
+            full_window_s = round(RAW_WINDOW_BINS / SAMPLE_RATE, 2)
+            quarter_window_s = round(full_window_s / 4, 2)
             presets = {
-                "Clinical": (DISPLAY_BINS, 1.0, 180),
-                "Alpha Focus": (DISPLAY_BINS, 1.0, 210),
-                "Full Spectrum": (DISPLAY_BINS, 1.0, 180),
-                "Presentation": (DISPLAY_BINS, 1.0, 260),
+                "Clinical": (quarter_window_s, ADC_REFERENCE_V, 180),
+                "Alpha Focus": (quarter_window_s, ADC_REFERENCE_V, 210),
+                "Full Spectrum": (full_window_s, ADC_REFERENCE_V, 180),
+                "Presentation": (quarter_window_s, ADC_REFERENCE_V, 260),
             }
         else:
             presets = {
@@ -2238,8 +2376,8 @@ class MultiChannelFFTApp(QMainWindow):
         if self.display_mode == "Raw Data":
             self.x_max_spin.blockSignals(True)
             self.y_max_spin.blockSignals(True)
-            self.x_max_spin.setValue(RAW_WINDOW_BINS)
-            self.y_max_spin.setValue(max(1, len(active)))
+            self.x_max_spin.setValue(round(RAW_WINDOW_BINS / SAMPLE_RATE, 2))
+            self.y_max_spin.setValue(max(ADC_REFERENCE_V, ADC_REFERENCE_V * len(active)))
             self.x_max_spin.blockSignals(False)
             self.y_max_spin.blockSignals(False)
             self.update_axis_ranges()
@@ -2293,6 +2431,25 @@ class MultiChannelFFTApp(QMainWindow):
             if ch_idx in self.curves:
                 self.curves[ch_idx].setPen(pg.mkPen(color=color, width=2))
 
+    def set_active_sensor_count(self, n):
+        """Custom Sensors mode: activate the first n channels (1..NUM_CHANNELS)
+        and deactivate the rest. Channel count itself is capped at NUM_CHANNELS
+        because that is what the firmware's fixed-size frame protocol supports;
+        this control lets you dial how many of those inputs are treated as
+        live sensors, from a single channel up to the full set."""
+        if not hasattr(self, "checkboxes"):
+            return
+        n = int(np.clip(n, 1, NUM_CHANNELS))
+        self.active_sensor_count = n
+        for i, cb in enumerate(self.checkboxes):
+            cb.blockSignals(True)
+            cb.setChecked(i < n)
+            cb.blockSignals(False)
+        self.update_channel_visibility()
+        if getattr(self, "workspace_mode", "") == "Sensors":
+            self._refresh_workspace_ui()
+        self._set_status(f"Sensors: {n} of {NUM_CHANNELS} channel(s) active.", self.ui_accent)
+
     def update_channel_visibility(self):
         active_count = 0
         for idx in self.channel_render_order:
@@ -2305,7 +2462,10 @@ class MultiChannelFFTApp(QMainWindow):
                         pw = pg.PlotWidget()
                         self._configure_split_plot(pw)
                         self._connect_plot_hover(pw, idx)
-                        wrapper = DraggablePlotWrapper(idx, pw, initial_height=self.current_plot_height)
+                        wrapper = DraggablePlotWrapper(
+                            idx, pw, initial_height=self.current_plot_height,
+                            channel_label=self._channel_label(idx),
+                        )
                         row = active_count // self.split_columns
                         col = active_count %  self.split_columns
                         self.grid_layout.addWidget(wrapper, row, col)
@@ -2331,7 +2491,7 @@ class MultiChannelFFTApp(QMainWindow):
                             pen=pg.mkPen(color=self.channel_colors[idx], width=2),
                         )
                         self.plot_legend.addItem(
-                            self.curves[idx], EEG_10_20_LABELS[idx]
+                            self.curves[idx], self._channel_label(idx)
                         )
                         self._ensure_peak_marker(idx, self.plot_widget)
             else:
@@ -2372,7 +2532,7 @@ class MultiChannelFFTApp(QMainWindow):
             self.dropped_packets = 0
             self.session_runtime = 0.0
             self.last_update_time = time.time()
-            self._send_stream_command(b"R" if self.display_mode == "Raw Data" else b"F")
+            self._send_workspace_command()
             port = dlg.selected_port_name
             baud = dlg.selected_baud
             self.hw_status_label.setText(f"⬤  {port} @ {baud}")
