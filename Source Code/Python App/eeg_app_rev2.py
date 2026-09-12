@@ -778,11 +778,13 @@ class MultiChannelFFTApp(QMainWindow):
 
         self.serial_timer = QTimer()
         self.serial_timer.timeout.connect(self._poll_serial)
-        self.serial_timer.start(2)
+        self.serial_timer.setTimerType(Qt.PreciseTimer)
+        self.serial_timer.start(1)
 
         self.render_timer = QTimer()
         self.render_timer.timeout.connect(self.update_plots)
-        self.render_timer.start(16)
+        self.render_timer.setTimerType(Qt.PreciseTimer)
+        self.render_timer.start(4)
 
     # ══════════════════════════════════════════════════════════════════════════
     # Home dashboard
@@ -1348,6 +1350,8 @@ class MultiChannelFFTApp(QMainWindow):
             return data
 
         visible_channels = list(self.curves)
+        if self.is_split_view:
+            return (data - 32768.0) / 24000.0 * 0.38 + 0.5
         try:
             lane = visible_channels.index(channel_idx)
         except ValueError:
@@ -1358,7 +1362,7 @@ class MultiChannelFFTApp(QMainWindow):
 
     def _y_max(self):
         if self.display_mode == "Raw Data":
-            return max(1.0, float(len(self.curves)))
+            return 1.0 if self.is_split_view else max(1.0, float(len(self.curves)))
         return self.y_max_spin.value() if hasattr(self, "y_max_spin") else 80
 
     def init_plot_display(self):
@@ -1418,9 +1422,11 @@ class MultiChannelFFTApp(QMainWindow):
             return
 
         point = view_box.mapSceneToView(position)
-        bin_index = int(np.clip(round(point.x()), 0, DISPLAY_BINS - 1))
+        data_matrix = self._plot_data_matrix()
+        max_index = data_matrix.shape[1] - 1
+        bin_index = int(np.clip(round(point.x()), 0, max_index))
         if self.display_mode == "Raw Data":
-            horizontal_text = f"bin {bin_index:03d}"
+            horizontal_text = f"sample {bin_index:03d}"
         else:
             horizontal_value = HZ_AXIS[bin_index]
             horizontal_text = f"{horizontal_value:.1f} Hz"
@@ -1429,11 +1435,18 @@ class MultiChannelFFTApp(QMainWindow):
             if not active:
                 self.cursor_readout.setText("No active traces")
                 return
-            channel_idx = max(active, key=lambda idx: self.fft_data_matrix[idx, bin_index])
-        magnitude = self.fft_data_matrix[channel_idx, bin_index]
+            if self.display_mode == "Raw Data":
+                channel_idx = max(
+                    active,
+                    key=lambda idx: abs(data_matrix[idx, bin_index] - 32768.0),
+                )
+            else:
+                channel_idx = max(active, key=lambda idx: data_matrix[idx, bin_index])
+        magnitude = data_matrix[channel_idx, bin_index]
         label = EEG_10_20_LABELS[channel_idx]
+        value_name = "raw" if self.display_mode == "Raw Data" else "mag"
         self.cursor_readout.setText(
-            f"{label}  |  {horizontal_text}  |  {magnitude:.2f} mag"
+            f"{label}  |  {horizontal_text}  |  {magnitude:.2f} {value_name}"
         )
 
     def _ensure_peak_marker(self, channel_idx, plot_widget):
@@ -1454,6 +1467,8 @@ class MultiChannelFFTApp(QMainWindow):
         self.peak_labels[key] = label
 
     def _update_peak_marker(self, channel_idx, data_row, plot_widget):
+        if self.display_mode == "Raw Data":
+            return
         key = (id(plot_widget), channel_idx)
         self._ensure_peak_marker(channel_idx, plot_widget)
         peak_bin = int(np.argmax(data_row))
@@ -1469,7 +1484,7 @@ class MultiChannelFFTApp(QMainWindow):
         self.show_peak_markers = not self.show_peak_markers
         self.peak_btn.setText("⌖ Peaks ON" if self.show_peak_markers else "⌖ Peaks OFF")
         for item in list(self.peak_lines.values()) + list(self.peak_labels.values()):
-            item.setVisible(self.show_peak_markers)
+            item.setVisible(self.show_peak_markers and self.display_mode != "Raw Data")
 
     def _mode_geometry_config(self):
         if self.display_mode == "Raw Data":
@@ -1480,7 +1495,7 @@ class MultiChannelFFTApp(QMainWindow):
                 "x_decimals": 0,
                 "x_step": 1.0,
                 "x_value": float(RAW_WINDOW_BINS),
-                "y_label": "Y Max (raw):",
+                "y_label": "Trace lanes:",
                 "y_min": 0.0,
                 "y_max": 65535.0,
                 "y_decimals": 0,
@@ -1504,7 +1519,8 @@ class MultiChannelFFTApp(QMainWindow):
 
     def _style_plot_widget(self, plot_widget, step_hz):
         plot_widget.setBackground('#202024')
-        plot_widget.setLabel('left', 'Magnitude', **{'color': '#858585', 'font-size': '11px'})
+        left_label = 'Trace lanes' if self.display_mode == "Raw Data" else 'Magnitude'
+        plot_widget.setLabel('left', left_label, **{'color': '#858585', 'font-size': '11px'})
         bottom_label = 'Bin index' if self.display_mode == "Raw Data" else 'Frequency (Hz)'
         plot_widget.setLabel('bottom', bottom_label, **{'color': '#858585', 'font-size': '11px'})
         plot_item = plot_widget.getPlotItem()
@@ -1567,6 +1583,11 @@ class MultiChannelFFTApp(QMainWindow):
         ]
         for plot_widget in plots:
             plot_widget.setLabel(
+                'left',
+                'Trace lanes' if raw_mode else 'Magnitude',
+                **{'color': '#858585', 'font-size': '11px'},
+            )
+            plot_widget.setLabel(
                 'bottom',
                 'Bin index' if raw_mode else 'Frequency (Hz)',
                 **{'color': '#858585', 'font-size': '11px'},
@@ -1585,6 +1606,7 @@ class MultiChannelFFTApp(QMainWindow):
         self._apply_band_visibility()
         plot_data = self._plot_data_matrix()
         for idx, curve in self.curves.items():
+            curve.setPen(pg.mkPen(color=self.channel_colors[idx], width=1 if raw_mode else 2))
             curve.setData(x=self._display_axis(), y=self._plot_channel_values(idx))
         self.update_axis_ranges()
 
@@ -1659,13 +1681,18 @@ class MultiChannelFFTApp(QMainWindow):
             self._record_duration = dlg.duration_seconds
             self._record_elapsed  = 0.0
 
-            self._csv_file   = open(path, 'w', newline='')
+            try:
+                self._csv_file = open(path, 'w', newline='')
+            except OSError as error:
+                self._set_status(f"Recording failed: {error}", "#E25C5C")
+                return
             self._csv_writer = csv.writer(self._csv_file)
             value_prefix = "raw" if self.display_mode == "Raw Data" else "bin"
+            sample_count = RAW_WINDOW_BINS if self.display_mode == "Raw Data" else DISPLAY_BINS
             header = ["timestamp"] + [
                 f"{EEG_10_20_LABELS[ch]}_{value_prefix}{b}"
                 for ch in self._record_channels
-                for b in range(DISPLAY_BINS)
+                for b in range(sample_count)
             ]
             self._csv_writer.writerow(header)
             self._recording = True
@@ -1748,6 +1775,9 @@ class MultiChannelFFTApp(QMainWindow):
         active = list(self.curves.keys())
         if not active:
             return
+        if self.display_mode == "Raw Data":
+            self.update_axis_ranges()
+            return
         maximum = float(np.max(self.fft_data_matrix[active]))
         y_max = max(1.0, maximum * 1.12)
         plots = [self.plot_widget] if not self.is_split_view else [
@@ -1793,6 +1823,15 @@ class MultiChannelFFTApp(QMainWindow):
     def fit_axes_to_data(self):
         active = list(self.curves.keys())
         if not active:
+            return
+        if self.display_mode == "Raw Data":
+            self.x_max_spin.blockSignals(True)
+            self.y_max_spin.blockSignals(True)
+            self.x_max_spin.setValue(RAW_WINDOW_BINS)
+            self.y_max_spin.setValue(max(1, len(active)))
+            self.x_max_spin.blockSignals(False)
+            self.y_max_spin.blockSignals(False)
+            self.update_axis_ranges()
             return
         visible = self.fft_data_matrix[active]
         y_min   = float(visible.min())
@@ -1904,20 +1943,22 @@ class MultiChannelFFTApp(QMainWindow):
         dlg = ConnectionDialog(self.ser, parent=self)
         dlg.exec_()
 
-        prev_connected = self.ser and self.ser.is_open
         self.ser = dlg.serial_port
 
         if self.ser and self.ser.is_open:
-            if not prev_connected:
-                # Fresh connection — reset all counters and buffer
-                self.ser.reset_input_buffer()
-                self._serial_buf.clear()
-                self._last_seq       = -1
-                self._crc_errors     = 0
-                self.packet_count    = 0
-                self.dropped_packets = 0
-                self.session_runtime = 0.0
-                self.last_update_time = time.time()
+            # Every connection change starts a clean protocol session.
+            self.ser.reset_input_buffer()
+            self._serial_buf.clear()
+            self._raw_pending = np.empty((NUM_CHANNELS, 0), dtype=np.float32)
+            self._raw_sample_accumulator = 0.0
+            self._frame_ready = False
+            self._last_seq       = -1
+            self._crc_errors     = 0
+            self.packet_count    = 0
+            self.dropped_packets = 0
+            self.session_runtime = 0.0
+            self.last_update_time = time.time()
+            self._send_stream_command(b"R" if self.display_mode == "Raw Data" else b"F")
             port = dlg.selected_port_name
             baud = dlg.selected_baud
             self.hw_status_label.setText(f"⬤  {port} @ {baud}")
@@ -2132,15 +2173,17 @@ class MultiChannelFFTApp(QMainWindow):
                 buf = buf[2:]   # skip sync, try next
                 continue
 
+            # Reject duplicates and old frames before updating stream state.
+            if self._last_seq >= 0:
+                sequence_delta = (seq - self._last_seq) & 0xFFFF
+                if sequence_delta == 0 or sequence_delta > 0x8000:
+                    buf = buf[PROTO_FRAME_SIZE:]
+                    continue
+                if sequence_delta > 1:
+                    self.dropped_packets += sequence_delta - 1
+
             # Good frame
             self.packet_count += 1
-
-            # Check sequence continuity
-            if self._last_seq >= 0:
-                expected_seq = (self._last_seq + 1) & 0xFFFF
-                if seq != expected_seq:
-                    missed = (seq - expected_seq) & 0xFFFF
-                    self.dropped_packets += missed
             self._last_seq = seq
 
             # Unpack uint16 → float32. In raw-data mode the firmware sends analog
@@ -2237,6 +2280,11 @@ class MultiChannelFFTApp(QMainWindow):
             self.frame_count   = 0
             self.last_fps_time = now
 
+        if self.is_frozen:
+            self._frame_ready = False
+            self._raw_pending = np.empty((NUM_CHANNELS, 0), dtype=np.float32)
+            return
+
         has_new_frame = self._frame_ready
         if has_new_frame:
             self._frame_ready = False
@@ -2254,9 +2302,6 @@ class MultiChannelFFTApp(QMainWindow):
                 self._raw_pending = self._raw_pending[:, sample_count:]
                 has_new_frame = True
 
-        if self.is_frozen:
-            return
-
         if has_new_frame:
             plot_data = self._plot_data_matrix()
             for idx, curve in self.curves.items():
@@ -2268,11 +2313,12 @@ class MultiChannelFFTApp(QMainWindow):
             source = "LIVE" if self.ser and self.ser.is_open else "PREVIEW"
             self.graph_status_label.setText(f"{source}  /  {len(self.curves):02d} TRACES")
 
-        if self._recording and self._csv_writer:
+        if has_new_frame and self._recording and self._csv_writer:
+            record_matrix = self._plot_data_matrix()
             row = [f"{now:.4f}"] + [
-                self.fft_data_matrix[ch, b]
+                record_matrix[ch, b]
                 for ch in self._record_channels
-                for b in range(DISPLAY_BINS)
+                for b in range(record_matrix.shape[1])
             ]
             self._csv_writer.writerow(row)
             if self._record_duration is not None:
@@ -2285,14 +2331,15 @@ class MultiChannelFFTApp(QMainWindow):
         self._peak_tick += 1
         if self._peak_tick >= 6:
             self._peak_tick = 0
+            indicator_matrix = self._plot_data_matrix()
             if self.is_split_view:
                 for idx, wrapper in self.individual_widgets.items():
-                    wrapper.update_peak(self.fft_data_matrix[idx], self.display_mode)
-                    wrapper.update_quality(self.fft_data_matrix[idx])
-                    self._update_peak_marker(idx, self.fft_data_matrix[idx], wrapper.plot_widget)
+                    wrapper.update_peak(indicator_matrix[idx], self.display_mode)
+                    wrapper.update_quality(indicator_matrix[idx])
+                    self._update_peak_marker(idx, indicator_matrix[idx], wrapper.plot_widget)
             else:
                 for idx in self.curves:
-                    self._update_peak_marker(idx, self.fft_data_matrix[idx], self.plot_widget)
+                    self._update_peak_marker(idx, indicator_matrix[idx], self.plot_widget)
 
     def closeEvent(self, event):
         if self._recording:
