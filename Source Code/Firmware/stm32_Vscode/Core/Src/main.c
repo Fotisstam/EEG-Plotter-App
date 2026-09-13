@@ -4,184 +4,363 @@
   * @file           : main.c
   * @brief          : Main program body
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
+
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "stm32f4xx_hal_gpio.h"
 #include "usb_device.h"
 #include "usbd_cdc_if.h"
 #include <math.h>
-#include <string.h>
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
+/* Private defines -----------------------------------------------------------*/
 
-/* USER CODE END Includes */
+#define PROTO_SYNC0          0xAAU
+#define PROTO_SYNC1          0x55U
 
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
+#define NUM_CHANNELS         32U
+#define DISPLAY_BINS         128U
 
-/* USER CODE END PTD */
+#define PROTO_HDR_SIZE       7U
+#define PROTO_DATA_BYTES     (NUM_CHANNELS * DISPLAY_BINS * 2U)
+#define PROTO_FRAME_SIZE     (PROTO_HDR_SIZE + PROTO_DATA_BYTES + 2U)
 
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-#define PROTO_SYNC0      0xAAU
-#define PROTO_SYNC1      0x55U
-#define NUM_CHANNELS     32U
-#define DISPLAY_BINS     128U
-#define PROTO_HDR_SIZE   7U
-#define FRAME_PERIOD_MS  20U
-#define SAMPLE_RATE      256U
-#define PROTO_DATA_BYTES (NUM_CHANNELS * DISPLAY_BINS * 2U)
-#define PROTO_FRAME_SIZE (PROTO_HDR_SIZE + PROTO_DATA_BYTES + 2U)
-#define STREAM_MODE_FFT  'F'
-#define STREAM_MODE_RAW  'R'
+#define FRAME_PERIOD_MS      20U
+#define SAMPLE_RATE          256U
+
+#define STREAM_MODE_FFT      'F'
+#define STREAM_MODE_RAW      'R'
+#define STREAM_MODE_SENSORS  'S'
+#define STREAM_MODE_OSC      'O'
+
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-/* USER CODE END PD */
 
 /* Private variables ---------------------------------------------------------*/
+
 static uint16_t g_seq = 0U;
 static uint32_t g_raw_sample_index = 0U;
 
-/* Enough room for the largest supported mode (FFT). */
 static uint8_t frame[2][PROTO_FRAME_SIZE];
 
 /* Private function prototypes -----------------------------------------------*/
+
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 
-/* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* ========================================================================== */
+/* Utility functions                                                         */
+/* ========================================================================== */
+
 static uint16_t crc16_ccitt(const uint8_t *data, uint32_t len)
 {
-  uint16_t crc = 0xFFFFU;
-  for (uint32_t i = 0; i < len; ++i)
-  {
-    crc ^= (uint16_t)data[i] << 8;
-    for (uint8_t bit = 0; bit < 8U; ++bit)
+    uint16_t crc = 0xFFFFU;
+
+    for (uint32_t i = 0U; i < len; i++)
     {
-      crc = (crc & 0x8000U) ? (uint16_t)((crc << 1) ^ 0x1021U)
-                             : (uint16_t)(crc << 1);
+        crc ^= (uint16_t)data[i] << 8;
+
+        for (uint8_t bit = 0U; bit < 8U; bit++)
+        {
+            if (crc & 0x8000U)
+            {
+                crc = (uint16_t)((crc << 1) ^ 0x1021U);
+            }
+            else
+            {
+                crc <<= 1;
+            }
+        }
     }
-  }
-  return crc;
+
+    return crc;
 }
 
-static void write_u16_le(uint8_t **pp, uint16_t value)
+static void write_u16_le(uint8_t **p, uint16_t value)
 {
-  uint8_t *p = *pp;
-  p[0] = (uint8_t)(value & 0xFFU);
-  p[1] = (uint8_t)(value >> 8);
-  *pp += 2;
+    (*p)[0] = (uint8_t)(value & 0xFFU);
+    (*p)[1] = (uint8_t)(value >> 8);
+    *p += 2;
 }
 
 static uint16_t clamp_u16(float value)
 {
-  if (value <= 0.0f) return 0U;
-  if (value >= 65535.0f) return 65535U;
-  return (uint16_t)value;
+    if (value <= 0.0f)
+        return 0U;
+
+    if (value >= 65535.0f)
+        return 65535U;
+
+    return (uint16_t)value;
 }
 
-/* Test waveform only. Replace this with your ADC/DMA samples in the real build. */
-static float raw_test_sample(uint16_t ch, uint32_t sample_index)
+static uint8_t is_valid_stream_mode(uint8_t mode)
 {
-  const float phase = (float)ch * 0.20f;
-  const float signal = sinf(2.0f * (float)M_PI *
-                            ((float)sample_index * 8.0f / (float)SAMPLE_RATE + phase));
-  return 32768.0f + signal * 24000.0f;
+    return (mode == STREAM_MODE_FFT ||
+            mode == STREAM_MODE_RAW ||
+            mode == STREAM_MODE_SENSORS ||
+            mode == STREAM_MODE_OSC);
 }
 
-/* Test FFT data only. */
-static float fft_test_sample(uint16_t ch, uint16_t bin, float t)
+static void write_frame_header(uint8_t **p, uint16_t seq)
 {
-  const float freq_hz = (float)bin;
-  const float offset = (float)ch * 0.6f;
-  const float targets[4] = {8.0f + offset, 18.0f + offset,
-                            32.0f + offset, 58.0f + offset};
-  const float widths[4] = {1.3f, 1.4f, 2.0f, 2.5f};
-  float total = 0.0f;
+    *(*p)++ = PROTO_SYNC0;
+    *(*p)++ = PROTO_SYNC1;
 
-  for (uint8_t i = 0; i < 4U; ++i)
-  {
-    const float delta = freq_hz - targets[i];
-    total += 28000.0f * expf(-(delta * delta) /
-                             (2.0f * widths[i] * widths[i]));
-  }
+    write_u16_le(p, seq);
 
-  const float envelope = 0.8f +
-      0.2f * sinf(2.0f * (float)M_PI *
-                  (t * 0.5f + (float)ch * 0.13f));
-  return envelope * total + 200.0f;
+    *(*p)++ = NUM_CHANNELS;
+
+    write_u16_le(p, DISPLAY_BINS);
 }
+
+static uint16_t finish_frame(uint8_t *frame_buf, uint8_t *p)
+{
+    uint16_t crc = crc16_ccitt(
+        frame_buf + PROTO_HDR_SIZE,
+        PROTO_DATA_BYTES
+    );
+
+    write_u16_le(&p, crc);
+
+    return (uint16_t)(p - frame_buf);
+}
+
+/* ========================================================================== */
+/* Sample timing                                                             */
+/* ========================================================================== */
 
 /*
- * RAW packet:
- *   Uses the same 32 x 128 payload shape as FFT packets so the existing
- *   Python parser can consume both modes without changing frame boundaries.
- * The waveform clock advances by the complete 128-sample block because the
- * current Python protocol appends every value in the fixed-size packet.
+ * 25 frames = 500 ms.
+ *
+ * 128 fresh samples are distributed as:
+ *
+ *     3 x 6 samples
+ *    22 x 5 samples
+ *
+ * Frames 0, 12 and 24 contain 6 fresh samples.
  */
+static uint16_t fresh_samples_for_frame(uint16_t seq)
+{
+    uint16_t slot = seq % 25U;
+
+    if (slot == 0U || slot == 12U || slot == 24U)
+        return 6U;
+
+    return 5U;
+}
+
+/* ========================================================================== */
+/* Test waveforms                                                             */
+/* ========================================================================== */
+
+static float raw_test_sample(uint16_t ch, uint32_t sample_index)
+{
+    float phase = (float)ch * 0.20f;
+
+    float signal = sinf(
+        2.0f * (float)M_PI *
+        ((float)sample_index * 8.0f / SAMPLE_RATE + phase)
+    );
+
+    return 32768.0f + signal * 24000.0f;
+}
+
+static float fft_test_sample(uint16_t ch, uint16_t bin, float time)
+{
+    float freq = (float)bin;
+    float offset = (float)ch * 0.6f;
+
+    const float targets[4] =
+    {
+        8.0f  + offset,
+        18.0f + offset,
+        32.0f + offset,
+        58.0f + offset
+    };
+
+    const float widths[4] =
+    {
+        1.3f,
+        1.4f,
+        2.0f,
+        2.5f
+    };
+
+    float total = 0.0f;
+
+    for (uint8_t i = 0U; i < 4U; i++)
+    {
+        float delta = freq - targets[i];
+
+        total += 28000.0f *
+                 expf(
+                     -(delta * delta) /
+                     (2.0f * widths[i] * widths[i])
+                 );
+    }
+
+    float envelope =
+        0.8f +
+        0.2f * sinf(
+            2.0f * (float)M_PI *
+            (time * 0.5f + (float)ch * 0.13f)
+        );
+
+    return envelope * total + 200.0f;
+}
+
+static float sensors_test_sample(uint16_t ch)
+{
+    return 10000.0f + (float)ch * 1500.0f;
+}
+
+static float osc_test_sample(uint16_t ch, uint32_t sample_index)
+{
+    float phase = (float)ch * 0.15f;
+
+    float signal = sinf(
+        2.0f * (float)M_PI *
+        ((float)sample_index * 25.0f / SAMPLE_RATE + phase)
+    );
+
+    return 32768.0f + signal * 20000.0f;
+}
+
+/* ========================================================================== */
+/* Frame builders                                                             */
+/* ========================================================================== */
+
 static uint16_t build_raw_frame(uint8_t *frame_buf)
 {
-  uint8_t *p = frame_buf;
-  const uint16_t seq = g_seq++;
-  const uint32_t start = g_raw_sample_index;
+    uint8_t *p = frame_buf;
 
-  *p++ = PROTO_SYNC0;
-  *p++ = PROTO_SYNC1;
-  write_u16_le(&p, seq);
-  *p++ = (uint8_t)NUM_CHANNELS;
-  write_u16_le(&p, DISPLAY_BINS);
+    uint16_t seq = g_seq++;
+    uint32_t start = g_raw_sample_index;
 
-  for (uint16_t ch = 0; ch < NUM_CHANNELS; ++ch)
-  {
-    for (uint16_t n = 0; n < DISPLAY_BINS; ++n)
+    write_frame_header(&p, seq);
+
+    for (uint16_t ch = 0U; ch < NUM_CHANNELS; ch++)
     {
-      write_u16_le(&p, clamp_u16(raw_test_sample(ch, start + n)));
-    }
-  }
+        for (uint16_t n = 0U; n < DISPLAY_BINS; n++)
+        {
+            uint16_t value =
+                clamp_u16(raw_test_sample(ch, start + n));
 
-  write_u16_le(&p, crc16_ccitt(frame_buf + PROTO_HDR_SIZE, PROTO_DATA_BYTES));
-  g_raw_sample_index += DISPLAY_BINS;
-  return (uint16_t)(p - frame_buf);
+            write_u16_le(&p, value);
+        }
+    }
+
+    g_raw_sample_index += fresh_samples_for_frame(seq);
+
+    return finish_frame(frame_buf, p);
 }
 
 static uint16_t build_fft_frame(uint8_t *frame_buf)
 {
-  uint8_t *p = frame_buf;
-  const uint16_t seq = g_seq++;
-  const float t = (float)HAL_GetTick() / 1000.0f;
+    uint8_t *p = frame_buf;
 
-  *p++ = PROTO_SYNC0;
-  *p++ = PROTO_SYNC1;
-  write_u16_le(&p, seq);
-  *p++ = (uint8_t)NUM_CHANNELS;
-  write_u16_le(&p, DISPLAY_BINS);
+    uint16_t seq = g_seq++;
+    float time = (float)HAL_GetTick() / 1000.0f;
 
-  for (uint16_t ch = 0; ch < NUM_CHANNELS; ++ch)
-  {
-    for (uint16_t bin = 0; bin < DISPLAY_BINS; ++bin)
+    write_frame_header(&p, seq);
+
+    for (uint16_t ch = 0U; ch < NUM_CHANNELS; ch++)
     {
-      write_u16_le(&p, clamp_u16(fft_test_sample(ch, bin, t)));
-    }
-  }
+        for (uint16_t bin = 0U; bin < DISPLAY_BINS; bin++)
+        {
+            uint16_t value =
+                clamp_u16(fft_test_sample(ch, bin, time));
 
-  write_u16_le(&p, crc16_ccitt(frame_buf + PROTO_HDR_SIZE, PROTO_DATA_BYTES));
-  return (uint16_t)(p - frame_buf);
+            write_u16_le(&p, value);
+        }
+    }
+
+    return finish_frame(frame_buf, p);
 }
+
+static uint16_t build_sensors_frame(uint8_t *frame_buf)
+{
+    uint8_t *p = frame_buf;
+
+    uint16_t seq = g_seq++;
+
+    write_frame_header(&p, seq);
+
+    for (uint16_t ch = 0U; ch < NUM_CHANNELS; ch++)
+    {
+        uint16_t value =
+            clamp_u16(sensors_test_sample(ch));
+
+        for (uint16_t n = 0U; n < DISPLAY_BINS; n++)
+        {
+            write_u16_le(&p, value);
+        }
+    }
+
+    g_raw_sample_index += fresh_samples_for_frame(seq);
+
+    return finish_frame(frame_buf, p);
+}
+
+static uint16_t build_osc_frame(uint8_t *frame_buf)
+{
+    uint8_t *p = frame_buf;
+
+    uint16_t seq = g_seq++;
+    uint32_t start = g_raw_sample_index;
+
+    write_frame_header(&p, seq);
+
+    for (uint16_t ch = 0U; ch < NUM_CHANNELS; ch++)
+    {
+        for (uint16_t n = 0U; n < DISPLAY_BINS; n++)
+        {
+            uint16_t value =
+                clamp_u16(osc_test_sample(ch, start + n));
+
+            write_u16_le(&p, value);
+        }
+    }
+
+    g_raw_sample_index += fresh_samples_for_frame(seq);
+
+    return finish_frame(frame_buf, p);
+}
+
+/* ========================================================================== */
+/* Stream frame selector                                                      */
+/* ========================================================================== */
+
+static uint16_t build_stream_frame(
+    uint8_t mode,
+    uint8_t *frame_buf)
+{
+    switch (mode)
+    {
+        case STREAM_MODE_RAW:
+            return build_raw_frame(frame_buf);
+
+        case STREAM_MODE_FFT:
+            return build_fft_frame(frame_buf);
+
+        case STREAM_MODE_SENSORS:
+            return build_sensors_frame(frame_buf);
+
+        case STREAM_MODE_OSC:
+            return build_osc_frame(frame_buf);
+
+        default:
+            return 0U;
+    }
+}
+
 /* USER CODE END 0 */
+
 
 /**
   * @brief  The application entry point.
@@ -189,62 +368,113 @@ static uint16_t build_fft_frame(uint8_t *frame_buf)
   */
 int main(void)
 {
+    HAL_Init();
 
-  HAL_Init();
-  SystemClock_Config();
-  MX_GPIO_Init();
-  MX_USB_DEVICE_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_USB_DEVICE_Init();
 
-  uint8_t frame_index = 0U;
-  uint8_t frame_ready = 0U;
-  uint8_t stream_mode = STREAM_MODE_RAW;
-  uint16_t frame_len = 0U;
-  uint32_t next_build = HAL_GetTick() + FRAME_PERIOD_MS;
+    uint8_t frame_index = 0U;
+    uint8_t frame_ready = 0U;
 
-  while (1)
-  {
-    const uint32_t now = HAL_GetTick();
+    uint8_t stream_mode = STREAM_MODE_FFT;
 
-    const uint8_t requested_mode = CDC_GetStreamMode();
-    if (requested_mode == STREAM_MODE_RAW || requested_mode == STREAM_MODE_FFT)
+    uint16_t frame_len = 0U;
+
+    uint32_t next_build =
+        HAL_GetTick() + FRAME_PERIOD_MS;
+
+    while (1)
     {
-      if (requested_mode != stream_mode)
-      {
-        stream_mode = requested_mode;
-        g_raw_sample_index = 0U;
-        next_build = now + FRAME_PERIOD_MS;
-      }
+        uint32_t now = HAL_GetTick();
+
+        /* ================================================================ */
+        /* Check USB mode command                                           */
+        /* ================================================================ */
+
+        uint8_t requested_mode = CDC_GetStreamMode();
+
+        if (is_valid_stream_mode(requested_mode) &&
+            requested_mode != stream_mode)
+        {
+            /*
+             * Mode changed.
+             */
+            stream_mode = requested_mode;
+
+            /*
+             * Restart stream counters.
+             */
+            g_seq = 0U;
+            g_raw_sample_index = 0U;
+
+            /*
+             * Throw away any frame belonging to the previous mode.
+             */
+            frame_ready = 0U;
+
+            /*
+             * Start the new stream on the next 20 ms boundary.
+             */
+            next_build = now + FRAME_PERIOD_MS;
+        }
+
+        /* ================================================================ */
+        /* Build frame                                                      */
+        /* ================================================================ */
+
+        if (!frame_ready &&
+            (int32_t)(now - next_build) >= 0)
+        {
+            frame_len =
+                build_stream_frame(
+                    stream_mode,
+                    frame[frame_index]
+                );
+
+            /*
+             * If an invalid mode somehow reaches here,
+             * don't transmit an empty frame.
+             */
+            if (frame_len != 0U)
+            {
+                frame_ready = 1U;
+            }
+
+            next_build += FRAME_PERIOD_MS;
+
+            /*
+             * Avoid building a burst of old frames
+             * if the CPU was delayed.
+             */
+            if ((int32_t)(now - next_build) >
+                (int32_t)FRAME_PERIOD_MS)
+            {
+                next_build = now + FRAME_PERIOD_MS;
+            }
+        }
+
+        /* ================================================================ */
+        /* USB transmit                                                      */
+        /* ================================================================ */
+
+        if (frame_ready)
+        {
+            HAL_GPIO_TogglePin(GPIOB,GPIO_PIN_2);
+            HAL_Delay(500);
+            if (CDC_Transmit_FS(
+                    frame[frame_index],
+                    frame_len) == USBD_OK)
+            {
+                /*
+                 * Only change buffer after USB accepted
+                 * the current frame.
+                 */
+                frame_index ^= 1U;
+                frame_ready = 0U;
+            }
+        }
     }
-
-    /* Build once. If USB is busy, this exact frame is retried; it is never rebuilt. */
-    if (!frame_ready && (int32_t)(now - next_build) >= 0)
-    {
-      if (stream_mode == STREAM_MODE_RAW)
-      {
-        frame_len = build_raw_frame(frame[frame_index]);
-      }
-      else
-      {
-        frame_len = build_fft_frame(frame[frame_index]);
-      }
-
-      frame_ready = 1U;
-      next_build += FRAME_PERIOD_MS;
-
-      /* If the CPU was delayed for a long time, don't burst-build old frames. */
-      if ((int32_t)(now - next_build) > (int32_t)FRAME_PERIOD_MS)
-      {
-        next_build = now + FRAME_PERIOD_MS;
-      }
-    }
-
-    /* USB CDC is asynchronous. Only advance the double buffer after success. */
-    if (frame_ready && CDC_Transmit_FS(frame[frame_index], frame_len) == USBD_OK)
-    {
-      frame_index ^= 1U;
-      frame_ready = 0U;
-    }
-  }
 }
 
 /**
