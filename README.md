@@ -74,7 +74,7 @@ Execute the Python script:
 
 ```bash
 cd EGG-Plotter-App
-python "Source Code/Python App/eeg_app.py"
+python "Source Code/Python App/eeg_app_rev4.py"
 ```
 
 ---
