@@ -73,7 +73,7 @@ pip install PyQt5 pyqtgraph numpy pyserial
 Execute the Python script:
 
 ```bash
-cd EGG-Plotter-App
+cd EEG-Plotter-App
 python "Source Code/Python App/eeg_app_rev4.py"
 ```
 
