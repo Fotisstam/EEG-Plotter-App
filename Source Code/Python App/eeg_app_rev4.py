@@ -774,9 +774,13 @@ class MultiChannelFFTApp(QMainWindow):
         self.setWindowTitle("32-Channel EEG Signal Analyzer")
 
         screen = QDesktopWidget().availableGeometry()
-        dw = int(screen.width()  * 0.85)
-        dh = int(screen.height() * 0.85)
+        dw = min(int(screen.width() * 0.85), screen.width())
+        dh = min(int(screen.height() * 0.85), screen.height())
         self.resize(dw, dh)
+        self.move(
+            screen.left() + max(0, (screen.width() - dw) // 2),
+            screen.top() + max(0, (screen.height() - dh) // 2),
+        )
         self.setAcceptDrops(True)
 
         self.setStyleSheet("""
@@ -1123,10 +1127,16 @@ class MultiChannelFFTApp(QMainWindow):
         root.addWidget(self.home_event_label)
         root.addStretch()
 
-        self.content_stack.addWidget(self.home_page)
+        self.home_scroll = QScrollArea()
+        self.home_scroll.setFrameShape(QFrame.NoFrame)
+        self.home_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.home_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.home_scroll.setWidgetResizable(True)
+        self.home_scroll.setWidget(self.home_page)
+        self.content_stack.addWidget(self.home_scroll)
 
     def show_home(self):
-        self.content_stack.setCurrentWidget(self.home_page)
+        self.content_stack.setCurrentWidget(self.home_scroll)
         self.home_nav_btn.setChecked(True)
         self.workspace_label.setText("OVERVIEW")
         self._set_dashboard_controls_visible(False)
